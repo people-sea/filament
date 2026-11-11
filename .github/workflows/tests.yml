@@ -101,15 +101,6 @@ jobs:
           MSSQL_MEMORY_LIMIT_MB: 2048
         ports:
           - 127.0.0.1:1433:1433
-      soketi:
-        image: ${{ matrix.php == '8.5' && matrix.laravel == '13.*' && matrix.db == 'sqlite' && 'quay.io/soketi/soketi:1.4-16-debian' || '' }}
-        env:
-          SOKETI_DEFAULT_APP_ID: filament-tests
-          SOKETI_DEFAULT_APP_KEY: filament-tests-key
-          SOKETI_DEFAULT_APP_SECRET: filament-tests-secret
-        ports:
-          - 127.0.0.1:6001:6001
-        options: --health-cmd="curl --fail http://127.0.0.1:6001/ready" --health-interval=5s --health-timeout=3s --health-retries=12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -219,10 +210,6 @@ jobs:
         env:
           DB_PASSWORD: password
           SQLSRV_PASSWORD: Filament_Test123!
-          FILAMENT_TEST_BROADCAST_HOST: ${{ matrix.php == '8.5' && matrix.laravel == '13.*' && matrix.db == 'sqlite' && '127.0.0.1' || '' }}
-          PUSHER_APP_ID: filament-tests
-          PUSHER_APP_KEY: filament-tests-key
-          PUSHER_APP_SECRET: filament-tests-secret
       - name: Execute serial tests
         run: ./vendor/bin/pest --configuration=phpunit.${{ matrix.db }}.xml --group=serial
         env:
