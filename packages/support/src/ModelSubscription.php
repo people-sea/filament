@@ -186,7 +186,7 @@ class ModelSubscription extends Component
             return [];
         }
 
-        $audiences = $this->evaluate($this->publishListAudienceUsing, ['record' => $record], [$record::class => $record]);
+        $audiences = $this->evaluate($this->publishListAudienceUsing, ['record' => $record], [Model::class => $record, $record::class => $record]);
 
         return array_values(array_unique(array_map(
             fn (array $coordinates): string => ModelListChangedBroadcast::getChannel($record, $this->listAudienceName, $coordinates),

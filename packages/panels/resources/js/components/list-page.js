@@ -1,5 +1,7 @@
+import echoListener from '../../../../support/resources/js/utilities/echo-listener.js'
+
 export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
-    let echo
+    let listener
     let isDestroyed = false
     let isRefreshing = false
     let needsRefresh = false
@@ -9,26 +11,11 @@ export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
     let refreshWasRejected = false
     let revision = 0
     let userRequests = 0
-    let registerEchoListener
-    let removeMessageInterceptor
-    let removeRequestInterceptor
     const removeWatchers = []
     const listeners = new AbortController()
-    const methods = ['authorizeListUpdates', 'refreshList']
-
-    const isBackgroundOnly = (message) => {
-        const actions = Array.from(message.actions)
-
-        return (
-            actions.length > 0 &&
-            !Object.keys(message.updates ?? {}).length &&
-            actions.every((action) => methods.includes(action.name))
-        )
-    }
 
     return {
         init() {
-            const owner = this.$wire.$id
             const changed = () => {
                 revision++
                 this.resume()
@@ -87,11 +74,19 @@ export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
                 }
             })
 
-            removeMessageInterceptor = this.$wire.$interceptMessage(
-                ({ message, onSuccess, onFinish }) => {
-                    if (message.component.id !== owner) return
-
-                    if (!isBackgroundOnly(message)) {
+            listener = echoListener({
+                component: this,
+                channel,
+                eventName: '.filament.model-list-changed',
+                echoConfiguration,
+                methods: ['authorizeListUpdates', 'refreshList'],
+                authorize: (socketId, callback) => {
+                    authorizationRequest = { socketId, callback }
+                    this.resume()
+                },
+                receive: () => this.invalidate(),
+                onMessage: ({ message, isBackground, onSuccess, onFinish }) => {
+                    if (!isBackground) {
                         userRequests++
                         revision++
                         onFinish(() => {
@@ -123,55 +118,15 @@ export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
                         }
                     })
                 },
-            )
-
-            removeRequestInterceptor = this.$wire.$interceptRequest(
-                ({ request, onError }) => {
-                    const messages = Array.from(request.messages)
-
-                    if (messages.length && messages.every(isBackgroundOnly)) {
-                        onError(({ preventDefault }) => preventDefault())
-                    }
-                },
-            )
-
-            registerEchoListener = () => {
-                if (echo || isDestroyed) return
-
-                echo = new window.EchoFactory({
-                    ...echoConfiguration,
-                    withoutInterceptors: true,
-                    channelAuthorization: {
-                        customHandler: (
-                            { socketId, channelName },
-                            callback,
-                        ) => {
-                            if (channelName !== `private-${channel}`) {
-                                callback(
-                                    new Error('The list audience has changed.'),
-                                )
-                                return
-                            }
-
-                            authorizationRequest = { socketId, callback }
-                            this.resume()
-                        },
-                    },
-                })
-
-                echo.private(channel)
-                    .listen('.filament.model-list-changed', () =>
-                        this.invalidate(),
-                    )
-                    .subscribed(() => this.invalidate())
-            }
-
-            window.addEventListener('EchoLoaded', registerEchoListener)
-            if (window.EchoFactory) registerEchoListener()
+            })
         },
 
         table() {
-            const element = this.$el.querySelector('.fi-ta')
+            const element = Array.from(
+                this.$el.querySelectorAll('.fi-ta'),
+            ).find(
+                (element) => element.closest('[wire\\:id]') === this.$wire.$el,
+            )
 
             return element ? Alpine.$data(element) : null
         },
@@ -277,7 +232,7 @@ export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
             } finally {
                 isRefreshing = false
 
-                if (refreshWasRejected) this.resume()
+                if (authorizationRequest || refreshWasRejected) this.resume()
             }
         },
 
@@ -285,11 +240,8 @@ export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
             isDestroyed = true
             authorizationRequest = null
             listeners.abort()
-            removeMessageInterceptor?.()
-            removeRequestInterceptor?.()
             removeWatchers.forEach((remove) => remove?.())
-            window.removeEventListener('EchoLoaded', registerEchoListener)
-            echo?.disconnect()
+            listener.destroy()
         },
     }
 }

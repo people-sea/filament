@@ -1,100 +1,57 @@
+import echoListener from '../../../../support/resources/js/utilities/echo-listener.js'
+
 export default ({ channel, echoConfiguration }) => {
-    let echo
-    let isDestroyed = false
+    let listener
     let isRefreshing = false
     let needsRefresh = false
-    let registerEchoListener
-    let removeRequestInterceptor
 
     return {
         init() {
-            removeRequestInterceptor = this.$wire.$interceptRequest(
-                ({ request, onError }) => {
-                    if (
-                        Array.from(request.messages).every((message) =>
-                            Array.from(message.actions).every((action) =>
-                                [
-                                    'authorizeRecordUpdates',
-                                    'refreshRecordPage',
-                                ].includes(action.name),
-                            ),
-                        )
-                    ) {
-                        onError(({ preventDefault }) => preventDefault())
+            listener = echoListener({
+                component: this,
+                channel,
+                eventName: '.filament.model-changed',
+                echoConfiguration,
+                methods: ['authorizeRecordUpdates', 'refreshRecordPage'],
+                authorize: async (socketId, callback) => {
+                    let authorization
+
+                    try {
+                        authorization =
+                            await this.$wire.authorizeRecordUpdates(socketId)
+                    } catch (error) {
+                        callback(error)
+                        return
                     }
+
+                    callback(
+                        authorization
+                            ? null
+                            : new Error('The record is no longer available.'),
+                        authorization,
+                    )
                 },
-            )
-
-            registerEchoListener = () => {
-                if (echo || isDestroyed) {
-                    return
-                }
-
-                echo = new window.EchoFactory({
-                    ...echoConfiguration,
-                    withoutInterceptors: true,
-                    channelAuthorization: {
-                        customHandler: async ({ socketId }, callback) => {
-                            let authorization
-
-                            try {
-                                authorization =
-                                    await this.$wire.authorizeRecordUpdates(
-                                        socketId,
-                                    )
-                            } catch (error) {
-                                if (!isDestroyed) callback(error)
-
-                                return
-                            }
-
-                            if (isDestroyed) return
-
-                            callback(
-                                authorization
-                                    ? null
-                                    : new Error(
-                                          'The record is no longer available.',
-                                      ),
-                                authorization,
-                            )
-                        },
-                    },
-                })
-
-                echo.private(channel)
-                    .listen('.filament.model-changed', () => this.refresh())
-                    .subscribed(() => this.refresh())
-            }
-
-            window.addEventListener('EchoLoaded', registerEchoListener)
-
-            if (window.EchoFactory) {
-                registerEchoListener()
-            }
+                receive: () => this.refresh(),
+            })
         },
 
         async refresh() {
             needsRefresh = true
 
-            if (isRefreshing || isDestroyed) {
+            if (isRefreshing || !listener.isActive()) {
                 return
             }
 
             isRefreshing = true
 
             try {
-                while (needsRefresh && !isDestroyed) {
+                while (needsRefresh && listener.isActive()) {
                     needsRefresh = false
 
                     try {
                         const title = await this.$wire.refreshRecordPage()
 
-                        if (
-                            title === null ||
-                            isDestroyed ||
-                            !this.$el.isConnected
-                        ) {
+                        if (title === null || !listener.isActive()) {
                             return
                         }
 
@@ -110,11 +67,7 @@ export default ({ channel, echoConfiguration }) => {
         },
 
         destroy() {
-            isDestroyed = true
-
-            window.removeEventListener('EchoLoaded', registerEchoListener)
-            removeRequestInterceptor?.()
-            echo?.disconnect()
+            listener.destroy()
         },
     }
 }

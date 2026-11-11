@@ -198,7 +198,7 @@ it('refreshes the page from a browser subscription without replacing drafts, foc
                             return channel
                         },
                         subscribed: (callback) => {
-                            this.configuration.channelAuthorization.customHandler({ socketId: '123.456', channelName }, (error, authorization) => {
+                            this.configuration.channelAuthorization.customHandler({ socketId: '123.456', channelName: `private-${channelName}` }, (error, authorization) => {
                                 if (error || !authorization?.auth) return
                                 transport.isSubscribed = true
                                 callback()
