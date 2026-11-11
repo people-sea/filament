@@ -17,6 +17,47 @@ it('combines `onlyEvents()` and `exceptEvents()` with exclusions taking preceden
     expect($subscription->getEvents())->toBe([ModelEvent::Updated]);
 });
 
+it('shares list audience identity without sharing publisher and subscriber authority', function (): void {
+    $record = new Post(['author_id' => 11]);
+    $owner = 11;
+    $subscription = ModelSubscription::make(Post::class)->listAudience(
+        'owners',
+        publishUsing: static fn (Post $record): array => [
+            ['tenant' => 7, 'owner' => $record->author_id],
+            ['owner' => (string) $record->author_id, 'tenant' => '7'],
+        ],
+        subscribeUsing: static function () use (&$owner): ?array {
+            return $owner ? ['owner' => $owner, 'tenant' => 7] : null;
+        },
+    );
+
+    $channels = $subscription->getListBroadcastChannels($record);
+
+    expect($channels)->toHaveCount(1)
+        ->and($subscription->getListBroadcastChannel($record, 'owners'))->toBe($channels[0])
+        ->and($subscription->getListBroadcastChannel($record, 'unknown'))->toBeNull();
+
+    $owner = 22;
+
+    expect($subscription->getListBroadcastChannel($record, 'owners'))->not->toBe($channels[0])
+        ->and($subscription->getListBroadcastChannels($record))->toBe($channels);
+
+    $owner = null;
+
+    expect($subscription->getListBroadcastChannel($record, 'owners'))->toBeNull()
+        ->and($subscription->getListBroadcastChannels($record))->toBe($channels);
+
+    $subscription->listAudience(null);
+
+    expect($subscription->getListAudienceName())->toBeNull()
+        ->and($subscription->getListBroadcastChannels($record))->toBe([])
+        ->and($subscription->getListBroadcastChannel($record, 'owners'))->toBeNull();
+});
+
+it('rejects incomplete list audience definitions', function (): void {
+    ModelSubscription::make(Post::class)->listAudience('owners');
+})->throws(InvalidArgumentException::class);
+
 it('can exclude events without an allowlist and reset both filters', function (): void {
     $subscription = ModelSubscription::make(Post::class)->exceptEvents([ModelEvent::Created, ModelEvent::Saved]);
 

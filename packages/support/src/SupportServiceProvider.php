@@ -23,6 +23,7 @@ use Filament\Support\Contracts\LoadingIndicator;
 use Filament\Support\Enums\GridDirection;
 use Filament\Support\Events\ModelChanged;
 use Filament\Support\Events\ModelChangedBroadcast;
+use Filament\Support\Events\ModelListChangedBroadcast;
 use Filament\Support\Facades\FilamentAsset;
 use Filament\Support\Facades\FilamentColor;
 use Filament\Support\Icons\IconManager;
@@ -185,6 +186,10 @@ class SupportServiceProvider extends PackageServiceProvider
             }
 
             event(app(ModelChangedBroadcast::class, ['record' => $event->getRecord()]));
+
+            foreach (app(RealtimeManager::class)->getSubscription($event->getRecord()::class)?->getListBroadcastChannels($event->getRecord()) ?? [] as $channel) {
+                event(app(ModelListChangedBroadcast::class, ['channel' => $channel]));
+            }
         });
 
         Event::listen('eloquent.*', static function (string $event, array $payload): void {

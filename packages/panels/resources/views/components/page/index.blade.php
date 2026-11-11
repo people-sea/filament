@@ -20,6 +20,12 @@
                     channel: @js($this->getRecordBroadcastChannel()),
                     echoConfiguration: @js(config('filament.broadcasting.echo')),
                 })"
+    @elseif (method_exists($this, 'hasLiveListUpdates') && $this->hasLiveListUpdates())
+        x-data="filamentListPage({
+                    channel: @js($this->getListBroadcastChannel()),
+                    echoConfiguration: @js(config('filament.broadcasting.echo')),
+                    hasDeferredFilters: @js($this->getTable()->hasDeferredFilters()),
+                })"
     @endif
     {{
         $attributes->class([

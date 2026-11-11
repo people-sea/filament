@@ -6,6 +6,7 @@ use BackedEnum;
 use Closure;
 use Filament\Support\Components\Component;
 use Filament\Support\Enums\ModelEvent;
+use Filament\Support\Events\ModelListChangedBroadcast;
 use Illuminate\Database\Eloquent\Model;
 use InvalidArgumentException;
 
@@ -34,6 +35,12 @@ class ModelSubscription extends Component
      * @var array<BackedEnum | string>
      */
     protected array $exceptEvents = [];
+
+    protected ?string $listAudienceName = null;
+
+    protected ?Closure $publishListAudienceUsing = null;
+
+    protected ?Closure $subscribeListAudienceUsing = null;
 
     protected ?Closure $afterModelSelectorChanged = null;
 
@@ -146,6 +153,56 @@ class ModelSubscription extends Component
         $this->exceptEvents = $events;
 
         return $this;
+    }
+
+    /**
+     * @param  ?Closure(Model): array<array<string, int | string>>  $publishUsing
+     * @param  ?Closure(): ?array<string, int | string>  $subscribeUsing
+     */
+    public function listAudience(?string $name, ?Closure $publishUsing = null, ?Closure $subscribeUsing = null): static
+    {
+        if (($name !== null) && (blank($name) || (! $publishUsing) || (! $subscribeUsing))) {
+            throw new InvalidArgumentException('A list audience requires a name, publisher and subscriber.');
+        }
+
+        $this->listAudienceName = $name;
+        $this->publishListAudienceUsing = ($name !== null) ? $publishUsing : null;
+        $this->subscribeListAudienceUsing = ($name !== null) ? $subscribeUsing : null;
+
+        return $this;
+    }
+
+    public function getListAudienceName(): ?string
+    {
+        return $this->listAudienceName;
+    }
+
+    /**
+     * @return array<string>
+     */
+    public function getListBroadcastChannels(Model $record): array
+    {
+        if ($this->listAudienceName === null) {
+            return [];
+        }
+
+        $audiences = $this->evaluate($this->publishListAudienceUsing, ['record' => $record], [$record::class => $record]);
+
+        return array_values(array_unique(array_map(
+            fn (array $coordinates): string => ModelListChangedBroadcast::getChannel($record, $this->listAudienceName, $coordinates),
+            $audiences,
+        )));
+    }
+
+    public function getListBroadcastChannel(Model $record, string $audience): ?string
+    {
+        if ($this->listAudienceName !== $audience) {
+            return null;
+        }
+
+        $coordinates = $this->evaluate($this->subscribeListAudienceUsing);
+
+        return ($coordinates !== null) ? ModelListChangedBroadcast::getChannel($record, $audience, $coordinates) : null;
     }
 
     /**

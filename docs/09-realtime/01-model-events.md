@@ -228,6 +228,77 @@ Changes made in another session or a background job re-render the page, updating
 
 Broadcasts contain no model attributes and use private record-specific channels. Filament authorizes subscriptions through the resource page and rechecks record scope and page access when refreshing. You do not need a channel authorization callback for these built-in subscriptions; your own channels still need their own authorization. Deleted or inaccessible records leave the current screen and unsaved input in place.
 
+## Refreshing resource lists
+
+You can opt a read-only resource list into live updates by defining a named audience on its model subscription. Unlike a record channel, a list audience receives changes to records that have not appeared in the current results, including creations and records moving into or out of a filter.
+
+Define the audience once in your service provider. `publishUsing` returns a collection of audience coordinates derived from the changed record. `subscribeUsing` independently authorizes the current reader and returns their coordinates, or `null` to deny the subscription. Filament constructs the private channel; you do not need to build matching channel names in both callbacks:
+
+```php
+use App\Models\Post;
+use Filament\Facades\Filament;
+use Filament\Support\Enums\ModelEvent;
+use Filament\Support\Facades\FilamentRealtime;
+
+FilamentRealtime::subscribe(Post::class)
+    ->onlyEvents([
+        ModelEvent::Created,
+        ModelEvent::Updated,
+        ModelEvent::Deleted,
+        ModelEvent::Restored,
+    ])
+    ->listAudience(
+        'owners',
+        publishUsing: static fn (Post $record): array => [
+            ['tenant' => $record->tenant_id, 'owner' => $record->owner_id],
+        ],
+        subscribeUsing: static function (): ?array {
+            $tenant = Filament::getTenant();
+            $user = Filament::auth()->user();
+
+            if (! $user->can('viewOwnPostActivity', $tenant)) {
+                return null;
+            }
+
+            return ['tenant' => $tenant->getKey(), 'owner' => $user->getKey()];
+        },
+    );
+```
+
+`viewOwnPostActivity` is an example application-defined ability, not a built-in Filament policy method. In this example, owners may receive activity signals for all their own posts in the tenant, including drafts. Configure that ability in your application before using the recipe.
+
+> [!WARNING]
+> Empty broadcasts still reveal activity timing. Sharing a tenant, or passing `viewAny`, does not necessarily authorize receiving all of that tenant's activity. Choose coordinates that respect your application's activity-visibility rules. Audience authorization does not filter table rows: scope your resource query to the current user's permissions, retaining tenant scoping. For this example, the resource query must restrict results to the current owner, not merely the current tenant. See [customizing the resource Eloquent query](../03-resources/01-overview#customizing-the-resource-eloquent-query).
+
+On your `ListRecords` page, select the definition by name:
+
+```php
+protected function getListUpdateAudienceName(): ?string
+{
+    return 'owners';
+}
+```
+
+The page resolves this name against its model's effective subscription. A missing definition or a denied reader does not fall back to a broader audience. Native panel, tenant and resource authorization still apply to signing and refreshing. Keep your existing websocket configuration and queue worker as described for record pages.
+
+Audience coordinates must be a nonempty array with named keys and nonempty integer or string identifiers. Key order and integer/string representations of the same identifier produce the same channel. Model class, connection, database and audience name also distinguish channels. `publishUsing` may return `[]` to notify nobody; duplicate coordinate sets are sent once. Use `listAudience(null)` to remove the definition. One definition belongs to each effective subscription; registering another matching model subscription replaces rather than combines its configuration.
+
+Publishing runs after commit, including outside a panel request. Derive coordinates from stored data, not the current authenticated user or `Filament::getTenant()`. The reader callback runs in the authorized list-page request; its result is not stored in the application-wide subscription registry. Existing record notifications continue alongside list notifications.
+
+### Preserving list state
+
+Refreshes rerun the current table query without remounting the page, refilling forms, or resetting filters, search, tabs, sort, page size or page number. Rows can move as results change. An emptied last page remains on that page with normal pagination navigation.
+
+Automatic refresh waits while you use a filter popup, edit an input, have unapplied filter changes, select rows, reorder records, or have a modal open. Selection includes the all-matching-minus-exclusions mode. When the interaction ends, pending changes are read together. A late background response is also rejected if an interaction began after it was requested, so it cannot overwrite newer input. There is no draft reconciliation or save-conflict handling.
+
+Notifications coalesce while a refresh is in flight or paused; this does not batch backend model events or guarantee one render per transaction. Successful reconnection rereads the current query after any interaction pause. Broadcasts are invalidations, not a durable ordered log.
+
+### Limiting audience and query dependencies
+
+Start with a root resource whose tenant and audience ownership do not change. If a record can move between owners, notify both its former and new audiences after commit. The current model event does not universally provide the previous recipients. Relationship, permission or ACL changes can also affect visibility without changing the root model; your application must report those changes explicitly. Quiet, bulk, raw SQL and external writes still need manual notifications. Filament does not infer the dependencies of arbitrary queries.
+
+This integration does not activate for nested resource lists, cursor pagination or tables containing inline-editable columns. Widgets and relation managers retain their own state and do not automatically refresh. Refresh authorization protects newly returned data after access is revoked, but does not immediately evict an existing socket or erase data already displayed. Applications requiring immediate activity revocation must enforce it in their broadcasting and recipient-routing integration.
+
 ## Listening for changes
 
 Register a Laravel listener for the shared event:

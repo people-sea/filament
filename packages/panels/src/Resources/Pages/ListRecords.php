@@ -27,6 +27,7 @@ use Livewire\Attributes\Url;
 
 class ListRecords extends Page implements Tables\Contracts\HasTable
 {
+    use Concerns\HasLiveListUpdates;
     use HasTabs;
     use Tables\Concerns\InteractsWithTable {
         makeTable as makeBaseTable;

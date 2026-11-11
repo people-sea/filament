@@ -12,11 +12,14 @@ use Filament\Actions\RestoreBulkAction;
 use Filament\Actions\Testing\TestAction;
 use Filament\Actions\ViewAction;
 use Filament\Facades\Filament;
+use Filament\Support\Enums\ModelEvent;
+use Filament\Support\Facades\FilamentRealtime;
 use Filament\Tests\Fixtures\Models\Post;
 use Filament\Tests\Fixtures\Models\Ticket;
 use Filament\Tests\Fixtures\Models\TicketMessage;
 use Filament\Tests\Fixtures\Models\User;
 use Filament\Tests\Fixtures\Policies\TicketPolicy;
+use Filament\Tests\Fixtures\Resources\Posts\Pages\ListLivePosts;
 use Filament\Tests\Fixtures\Resources\Posts\Pages\ListPosts;
 use Filament\Tests\Fixtures\Resources\Posts\Pages\ListPostsWithCustomFiltersRemoveAllAction;
 use Filament\Tests\Fixtures\Resources\Posts\Pages\ListPostsWithTabs;
@@ -49,6 +52,80 @@ it('can list posts', function (): void {
 
     livewire(ListPosts::class)
         ->assertCanSeeTableRecords($posts);
+});
+
+it('refreshes live lists through the current query without resetting filters, search, sort or page', function (): void {
+    config(['filament.broadcasting.echo' => ['broadcaster' => 'pusher']]);
+    $allowed = true;
+    FilamentRealtime::subscribe(Post::class)
+        ->onlyEvents([ModelEvent::Updated])
+        ->listAudience(
+            'owners',
+            publishUsing: static fn (Post $record): array => [['owner' => $record->author_id]],
+            subscribeUsing: static function () use (&$allowed): ?array {
+                return $allowed ? ['owner' => auth()->id()] : null;
+            },
+        );
+
+    $posts = collect(range(1, 12))->map(static fn (int $number): Post => Post::factory()->create([
+        'title' => sprintf('North %02d', $number),
+        'is_published' => true,
+        'author_id' => auth()->id(),
+    ]));
+    $draft = Post::factory()->create(['title' => 'North 99', 'is_published' => false, 'author_id' => auth()->id()]);
+
+    $component = livewire(ListLivePosts::class)
+        ->filterTable('is_published')
+        ->searchTable('North')
+        ->sortTable('title')
+        ->set('tableRecordsPerPage', 5)
+        ->call('setPage', 2)
+        ->assertCanSeeTableRecords($posts->slice(5, 5), inOrder: true)
+        ->assertCanNotSeeTableRecords([$draft]);
+
+    $posts[5]->updateQuietly(['title' => 'South changed externally']);
+
+    $component->call('refreshList')
+        ->assertSet('tableSearch', 'North')
+        ->assertSet('tableSort', 'title:asc')
+        ->assertSet('tableRecordsPerPage', 5)
+        ->assertSet('paginators.page', 2)
+        ->assertSet('tableFilters.is_published.isActive', true)
+        ->assertCanSeeTableRecords($posts->slice(6, 5), inOrder: true)
+        ->assertCanNotSeeTableRecords([$posts[5], $draft]);
+
+    $allowed = false;
+    $component->call('refreshList')->assertForbidden();
+
+    livewire(ListPosts::class)->call('refreshList')->assertForbidden();
+});
+
+it('signs only the server-resolved list audience and denies a missing subscription grant', function (): void {
+    config([
+        'filament.broadcasting.echo' => ['broadcaster' => 'pusher'],
+        'broadcasting.default' => 'list-test',
+        'broadcasting.connections.list-test' => [
+            'driver' => 'pusher',
+            'key' => 'test-key',
+            'secret' => 'test-secret',
+            'app_id' => 'list-test',
+            'options' => ['cluster' => 'mt1'],
+        ],
+    ]);
+    $subscription = FilamentRealtime::subscribe(Post::class)->listAudience(
+        'owners',
+        publishUsing: static fn (Post $record): array => [['owner' => $record->author_id]],
+        subscribeUsing: static fn (): array => ['owner' => auth()->id()],
+    );
+    $channel = $subscription->getListBroadcastChannel(new Post, 'owners');
+
+    livewire(ListLivePosts::class)->call('authorizeListUpdates', '12.34')->assertReturned([
+        'auth' => 'test-key:' . hash_hmac('sha256', '12.34:private-' . $channel, 'test-secret'),
+    ]);
+
+    $subscription->listAudience('owners', static fn (): array => [], static fn (): ?array => null);
+
+    livewire(ListLivePosts::class)->call('authorizeListUpdates', '12.34')->assertForbidden();
 });
 
 it('uses no-panel filters without changing default queries or pagination updates', function (): void {
