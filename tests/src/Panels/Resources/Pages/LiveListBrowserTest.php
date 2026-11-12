@@ -88,7 +88,11 @@ it('defers real list invalidations during selection, filter input and modal draf
     $post->update(['title' => 'Modal catch-up']);
     $page->assertScript('window.listNotifications > ' . $notifications)
         ->assertValue('[data-testid="live-list-note"]', 'Keep this unsaved note')
-        ->assertDontSee('Modal catch-up')
+        ->assertDontSee('Modal catch-up');
+
+    $page->script("Livewire.dispatch('live-list-note-updated')");
+    $page->assertSee('Activity received')
+        ->assertValue('[data-testid="live-list-note"]', 'Keep this unsaved note')
         ->assertNoAccessibilityIssues();
     $page->press('Cancel')->assertSee('Modal catch-up')->assertNoJavaScriptErrors();
 

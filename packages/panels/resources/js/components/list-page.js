@@ -1,20 +1,55 @@
-import echoListener from '../../../../support/resources/js/utilities/echo-listener.js'
+import eventListener from '../../../../support/resources/js/utilities/event-listener.js'
 
 export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
-    let listener
     let isDestroyed = false
-    let isRefreshing = false
-    let needsRefresh = false
-    let isSigning = false
-    let authorizationRequest
-    let authorizationWasRejected = false
-    let refreshWasRejected = false
     let revision = 0
     let userRequests = 0
+    let removeMessageInterceptor
+    const waitingCalls = new Set()
+    const rejectedMethods = new Set()
     const removeWatchers = []
     const listeners = new AbortController()
+    const methods = ['authorizeListUpdates', 'refreshList']
+    const isActive = (owner) => !isDestroyed && owner.$el.isConnected
+    const transport = eventListener({
+        channel,
+        echoConfiguration,
+        channelType: 'private',
+        eventName: '.filament.model-list-changed',
+        authorizationMethod: 'authorizeListUpdates',
+        refreshMethod: 'refreshList',
+        passEvent: false,
+        refreshOnSubscription: true,
+        coalesce: true,
+        async callUsing(method, parameters, call) {
+            while (isActive(this)) {
+                if (this.busy()) {
+                    await this.waitForListCall(method)
+                }
+
+                if (!isActive(this)) return null
+                if (this.busy()) continue
+
+                rejectedMethods.delete(method)
+
+                try {
+                    return await call()
+                } catch (error) {
+                    if (rejectedMethods.has(method)) continue
+                    if (method === 'authorizeListUpdates') throw error
+
+                    // Retain the invalidation without spinning on transport failures.
+                    await this.waitForListCall(method)
+                }
+            }
+
+            return null
+        },
+    })
 
     return {
+        ...transport,
+
         init() {
             const changed = () => {
                 revision++
@@ -43,7 +78,7 @@ export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
             }
 
             this.$nextTick(() => {
-                if (isDestroyed || !this.$el.isConnected) return
+                if (!isActive(this)) return
 
                 const table = this.table()
 
@@ -74,18 +109,16 @@ export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
                 }
             })
 
-            listener = echoListener({
-                component: this,
-                channel,
-                eventName: '.filament.model-list-changed',
-                echoConfiguration,
-                methods: ['authorizeListUpdates', 'refreshList'],
-                authorize: (socketId, callback) => {
-                    authorizationRequest = { socketId, callback }
-                    this.resume()
-                },
-                receive: () => this.invalidate(),
-                onMessage: ({ message, isBackground, onSuccess, onFinish }) => {
+            removeMessageInterceptor = this.$wire.$interceptMessage(
+                ({ message, onSuccess, onFinish }) => {
+                    if (message.component.id !== this.$wire.$id) return
+
+                    const actions = Array.from(message.actions)
+                    const isBackground =
+                        actions.length > 0 &&
+                        !Object.keys(message.updates ?? {}).length &&
+                        actions.every((action) => methods.includes(action.name))
+
                     if (!isBackground) {
                         userRequests++
                         revision++
@@ -98,27 +131,23 @@ export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
 
                     const dispatchedRevision = revision
 
-                    // Even renderless signing responses merge a Livewire snapshot.
+                    // Signing responses also merge snapshots. Reject before either can erase newer input.
                     onSuccess(() => {
                         if (
-                            isDestroyed ||
-                            !this.$el.isConnected ||
+                            !isActive(this) ||
                             dispatchedRevision !== revision ||
                             this.busy()
                         ) {
-                            for (const action of message.actions) {
-                                if (action.name === 'authorizeListUpdates')
-                                    authorizationWasRejected = true
-                                if (action.name === 'refreshList')
-                                    refreshWasRejected = true
-                            }
-
-                            needsRefresh = true
+                            actions.forEach((action) =>
+                                rejectedMethods.add(action.name),
+                            )
                             message.cancel()
                         }
                     })
                 },
-            })
+            )
+
+            transport.init.call(this)
         },
 
         table() {
@@ -160,88 +189,42 @@ export default ({ channel, echoConfiguration, hasDeferredFilters }) => {
             )
         },
 
-        invalidate() {
-            needsRefresh = true
+        receive(event) {
+            // A call waiting to read already covers every invalidation received before it starts.
+            const isRefreshWaiting = Array.from(waitingCalls).some(
+                (call) => call.method === 'refreshList',
+            )
             this.resume()
+            if (!isRefreshWaiting) return transport.receive.call(this, event)
+        },
+
+        async waitForListCall(method) {
+            let waitingCall
+            await new Promise((resolve) => {
+                waitingCall = { method, resolve }
+                waitingCalls.add(waitingCall)
+            })
+            waitingCalls.delete(waitingCall)
         },
 
         resume() {
             if (isDestroyed) return
 
-            this.$nextTick(() => this.drain())
-        },
+            this.$nextTick(() => {
+                if (!isActive(this) || this.busy()) return
 
-        async drain() {
-            if (
-                isDestroyed ||
-                !this.$el.isConnected ||
-                isRefreshing ||
-                isSigning ||
-                (!needsRefresh && !authorizationRequest) ||
-                this.busy()
-            )
-                return
-
-            if (authorizationRequest) {
-                const request = authorizationRequest
-                authorizationRequest = null
-                authorizationWasRejected = false
-                isSigning = true
-
-                try {
-                    const authorization = await this.$wire.authorizeListUpdates(
-                        request.socketId,
-                    )
-
-                    if (!isDestroyed && this.$el.isConnected)
-                        request.callback(null, authorization)
-                } catch (error) {
-                    if (!isDestroyed && authorizationWasRejected)
-                        authorizationRequest ??= request
-                    else if (!isDestroyed) request.callback(error)
-                } finally {
-                    isSigning = false
-                }
-
-                if (authorizationRequest) {
-                    this.resume()
-                    return
-                }
-            }
-
-            isRefreshing = true
-
-            try {
-                while (
-                    needsRefresh &&
-                    !isDestroyed &&
-                    this.$el.isConnected &&
-                    !this.busy()
-                ) {
-                    needsRefresh = false
-                    refreshWasRejected = false
-
-                    try {
-                        await this.$wire.refreshList()
-                    } catch {
-                        // Keep the dirty flag, but do not spin on transport/server failures.
-                        needsRefresh = true
-                        break
-                    }
-                }
-            } finally {
-                isRefreshing = false
-
-                if (authorizationRequest || refreshWasRejected) this.resume()
-            }
+                waitingCalls.forEach((call) => call.resolve())
+            })
         },
 
         destroy() {
             isDestroyed = true
-            authorizationRequest = null
+            waitingCalls.forEach((call) => call.resolve())
+            waitingCalls.clear()
             listeners.abort()
             removeWatchers.forEach((remove) => remove?.())
-            listener.destroy()
+            removeMessageInterceptor?.()
+            transport.destroy.call(this)
         },
     }
 }

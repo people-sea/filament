@@ -11,6 +11,8 @@ use Illuminate\Database\Eloquent\Builder;
 
 class ListLivePosts extends ListPosts
 {
+    public string $noteStatus = 'Waiting for activity';
+
     #[Unexposed]
     public function table(Table $table): Table
     {
@@ -19,7 +21,14 @@ class ListLivePosts extends ListPosts
             ->recordActions([
                 Action::make('note')->schema([
                     TextInput::make('note')->extraInputAttributes(['data-testid' => 'live-list-note']),
-                ])->action(static function (): void {}),
+                ])
+                    ->modalDescription(fn (): string => $this->noteStatus)
+                    ->livewireListeners([
+                        'live-list-note-updated' => static function (ListLivePosts $livewire): void {
+                            $livewire->noteStatus = 'Activity received';
+                        },
+                    ])
+                    ->action(static function (): void {}),
             ])
             ->filtersTriggerAction(static fn (Action $action): Action => $action->extraAttributes(['data-testid' => 'live-list-filters']))
             ->filtersApplyAction(static fn (Action $action): Action => $action->extraAttributes(['data-testid' => 'live-list-apply-filters']));

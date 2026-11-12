@@ -1,8 +1,8 @@
 <?php
 
 use Filament\Support\Enums\ModelEvent;
-use Filament\Support\Events\ModelChangedBroadcast;
 use Filament\Support\Events\ModelListChangedBroadcast;
+use Filament\Support\Events\RecordChangedBroadcast;
 use Filament\Support\Facades\FilamentRealtime;
 use Filament\Tests\Fixtures\Models\Post;
 use Filament\Tests\Fixtures\Models\User;
@@ -23,7 +23,7 @@ it('invalidates only the configured owner audience after commit while retaining 
         );
     $ownerChannel = $subscription->getListBroadcastChannel($post);
     $otherChannel = ModelListChangedBroadcast::getChannel($post, 'owners', ['tenant' => 7, 'owner' => $post->author_id + 1]);
-    Event::fake([ModelChangedBroadcast::class, ModelListChangedBroadcast::class]);
+    Event::fake([RecordChangedBroadcast::class, ModelListChangedBroadcast::class]);
 
     $post->update(['title' => 'Without Echo']);
     Event::assertNotDispatched(ModelListChangedBroadcast::class);
@@ -40,7 +40,7 @@ it('invalidates only the configured owner audience after commit while retaining 
     });
 
     Event::assertDispatchedTimes(ModelListChangedBroadcast::class, 1);
-    Event::assertDispatchedTimes(ModelChangedBroadcast::class, 1);
+    Event::assertDispatchedTimes(RecordChangedBroadcast::class, 1);
     Event::assertDispatched(ModelListChangedBroadcast::class, static fn (ModelListChangedBroadcast $event): bool => ((string) $event->broadcastOn() === 'private-' . $ownerChannel)
         && ((string) $event->broadcastOn() !== 'private-' . $otherChannel)
         && ($event->broadcastWith() === []));
@@ -49,7 +49,7 @@ it('invalidates only the configured owner audience after commit while retaining 
     $post->update(['title' => 'Record-only again']);
 
     Event::assertDispatchedTimes(ModelListChangedBroadcast::class, 1);
-    Event::assertDispatchedTimes(ModelChangedBroadcast::class, 2);
+    Event::assertDispatchedTimes(RecordChangedBroadcast::class, 2);
 });
 
 it('separates list identities by tenant, audience, model and database', function (): void {
