@@ -1,3 +1,7 @@
+// Temporary until the shared `event-listener.js` utility is available.
+// Verify its authorization and pre-snapshot cancellation hooks, then migrate
+// `record-page.js` and `list-page.js` and remove this helper. Keep each consumer's
+// refresh policy, including list interaction guards and catch-up, in that consumer.
 export default ({
     component,
     channel,

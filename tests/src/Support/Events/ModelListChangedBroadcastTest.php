@@ -21,7 +21,7 @@ it('invalidates only the configured owner audience after commit while retaining 
             publishUsing: static fn (Post $record): array => [['tenant' => 7, 'owner' => $record->author_id]],
             subscribeUsing: static fn (): array => ['owner' => $post->author_id, 'tenant' => 7],
         );
-    $ownerChannel = $subscription->getListBroadcastChannel($post, 'owners');
+    $ownerChannel = $subscription->getListBroadcastChannel($post);
     $otherChannel = ModelListChangedBroadcast::getChannel($post, 'owners', ['tenant' => 7, 'owner' => $post->author_id + 1]);
     Event::fake([ModelChangedBroadcast::class, ModelListChangedBroadcast::class]);
 

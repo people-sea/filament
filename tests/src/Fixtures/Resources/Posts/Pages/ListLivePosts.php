@@ -24,9 +24,4 @@ class ListLivePosts extends ListPosts
             ->filtersTriggerAction(static fn (Action $action): Action => $action->extraAttributes(['data-testid' => 'live-list-filters']))
             ->filtersApplyAction(static fn (Action $action): Action => $action->extraAttributes(['data-testid' => 'live-list-apply-filters']));
     }
-
-    protected function getListUpdateAudienceName(): ?string
-    {
-        return 'owners';
-    }
 }

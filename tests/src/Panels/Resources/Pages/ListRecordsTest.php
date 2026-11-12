@@ -19,7 +19,6 @@ use Filament\Tests\Fixtures\Models\Ticket;
 use Filament\Tests\Fixtures\Models\TicketMessage;
 use Filament\Tests\Fixtures\Models\User;
 use Filament\Tests\Fixtures\Policies\TicketPolicy;
-use Filament\Tests\Fixtures\Resources\Posts\Pages\ListLivePosts;
 use Filament\Tests\Fixtures\Resources\Posts\Pages\ListPosts;
 use Filament\Tests\Fixtures\Resources\Posts\Pages\ListPostsWithCustomFiltersRemoveAllAction;
 use Filament\Tests\Fixtures\Resources\Posts\Pages\ListPostsWithTabs;
@@ -54,7 +53,7 @@ it('can list posts', function (): void {
         ->assertCanSeeTableRecords($posts);
 });
 
-it('refreshes live lists through the current query without resetting filters, search, sort or page', function (): void {
+it('automatically refreshes subscribed lists without resetting filters, search, sort or page', function (): void {
     config(['filament.broadcasting.echo' => ['broadcaster' => 'pusher']]);
     $allowed = true;
     FilamentRealtime::subscribe(Post::class)
@@ -74,7 +73,7 @@ it('refreshes live lists through the current query without resetting filters, se
     ]));
     $draft = Post::factory()->create(['title' => 'North 99', 'is_published' => false, 'author_id' => auth()->id()]);
 
-    $component = livewire(ListLivePosts::class)
+    $component = livewire(ListPosts::class)
         ->filterTable('is_published')
         ->searchTable('North')
         ->sortTable('title')
@@ -86,6 +85,7 @@ it('refreshes live lists through the current query without resetting filters, se
     $posts[5]->updateQuietly(['title' => 'South changed externally']);
 
     $component->call('refreshList')
+        ->assertSuccessful()
         ->assertSet('tableSearch', 'North')
         ->assertSet('tableSort', 'title:asc')
         ->assertSet('tableRecordsPerPage', 5)
@@ -96,11 +96,9 @@ it('refreshes live lists through the current query without resetting filters, se
 
     $allowed = false;
     $component->call('refreshList')->assertForbidden();
-
-    livewire(ListPosts::class)->call('refreshList')->assertForbidden();
 });
 
-it('signs only the server-resolved list audience and denies a missing subscription grant', function (): void {
+it('automatically signs the server-resolved list audience and denies a missing subscription grant', function (): void {
     config([
         'filament.broadcasting.echo' => ['broadcaster' => 'pusher'],
         'broadcasting.default' => 'list-test',
@@ -113,19 +111,26 @@ it('signs only the server-resolved list audience and denies a missing subscripti
         ],
     ]);
     $subscription = FilamentRealtime::subscribe(Post::class)->listAudience(
-        'owners',
+        'post-activity',
         publishUsing: static fn (Post $record): array => [['owner' => $record->author_id]],
         subscribeUsing: static fn (): array => ['owner' => auth()->id()],
     );
-    $channel = $subscription->getListBroadcastChannel(new Post, 'owners');
+    $channel = $subscription->getListBroadcastChannel(new Post);
 
-    livewire(ListLivePosts::class)->call('authorizeListUpdates', '12.34')->assertReturned([
-        'auth' => 'test-key:' . hash_hmac('sha256', '12.34:private-' . $channel, 'test-secret'),
-    ]);
+    livewire(ListPosts::class)
+        ->call('authorizeListUpdates', '12.34')
+        ->assertSuccessful()
+        ->assertReturned([
+            'auth' => 'test-key:' . hash_hmac('sha256', '12.34:private-' . $channel, 'test-secret'),
+        ]);
 
-    $subscription->listAudience('owners', static fn (): array => [], static fn (): ?array => null);
+    $subscription->listAudience('post-activity', static fn (): array => [], static fn (): ?array => null);
 
-    livewire(ListLivePosts::class)->call('authorizeListUpdates', '12.34')->assertForbidden();
+    livewire(ListPosts::class)->call('authorizeListUpdates', '12.34')->assertForbidden();
+
+    $subscription->listAudience(null);
+
+    livewire(ListPosts::class)->call('authorizeListUpdates', '12.34')->assertForbidden();
 });
 
 it('uses no-panel filters without changing default queries or pagination updates', function (): void {

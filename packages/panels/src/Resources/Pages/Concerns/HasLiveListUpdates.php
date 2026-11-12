@@ -16,11 +16,6 @@ trait HasLiveListUpdates
 {
     protected string | false | null $cachedListBroadcastChannel = false;
 
-    protected function getListUpdateAudienceName(): ?string
-    {
-        return null;
-    }
-
     #[Unexposed]
     public function hasLiveListUpdates(): bool
     {
@@ -39,7 +34,6 @@ trait HasLiveListUpdates
         if (
             (! Filament::getCurrentOrDefaultPanel()->hasBroadcasting()) ||
             blank(config('filament.broadcasting.echo')) ||
-            (($audience = $this->getListUpdateAudienceName()) === null) ||
             $this->getParentRecord()
         ) {
             return null;
@@ -59,7 +53,7 @@ trait HasLiveListUpdates
 
         $record = $this->getTable()->getQuery()?->getModel();
 
-        return $this->cachedListBroadcastChannel = $record ? $subscription->getListBroadcastChannel($record, $audience) : null;
+        return $this->cachedListBroadcastChannel = $record ? $subscription->getListBroadcastChannel($record) : null;
     }
 
     /**

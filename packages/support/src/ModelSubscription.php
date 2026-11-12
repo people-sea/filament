@@ -194,15 +194,15 @@ class ModelSubscription extends Component
         )));
     }
 
-    public function getListBroadcastChannel(Model $record, string $audience): ?string
+    public function getListBroadcastChannel(Model $record): ?string
     {
-        if ($this->listAudienceName !== $audience) {
+        if ($this->listAudienceName === null) {
             return null;
         }
 
         $coordinates = $this->evaluate($this->subscribeListAudienceUsing);
 
-        return ($coordinates !== null) ? ModelListChangedBroadcast::getChannel($record, $audience, $coordinates) : null;
+        return ($coordinates !== null) ? ModelListChangedBroadcast::getChannel($record, $this->listAudienceName, $coordinates) : null;
     }
 
     /**

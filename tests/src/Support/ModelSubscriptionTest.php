@@ -34,24 +34,23 @@ it('shares list audience identity without sharing publisher and subscriber autho
     $channels = $subscription->getListBroadcastChannels($record);
 
     expect($channels)->toHaveCount(1)
-        ->and($subscription->getListBroadcastChannel($record, 'owners'))->toBe($channels[0])
-        ->and($subscription->getListBroadcastChannel($record, 'unknown'))->toBeNull();
+        ->and($subscription->getListBroadcastChannel($record))->toBe($channels[0]);
 
     $owner = 22;
 
-    expect($subscription->getListBroadcastChannel($record, 'owners'))->not->toBe($channels[0])
+    expect($subscription->getListBroadcastChannel($record))->not->toBe($channels[0])
         ->and($subscription->getListBroadcastChannels($record))->toBe($channels);
 
     $owner = null;
 
-    expect($subscription->getListBroadcastChannel($record, 'owners'))->toBeNull()
+    expect($subscription->getListBroadcastChannel($record))->toBeNull()
         ->and($subscription->getListBroadcastChannels($record))->toBe($channels);
 
     $subscription->listAudience(null);
 
     expect($subscription->getListAudienceName())->toBeNull()
         ->and($subscription->getListBroadcastChannels($record))->toBe([])
-        ->and($subscription->getListBroadcastChannel($record, 'owners'))->toBeNull();
+        ->and($subscription->getListBroadcastChannel($record))->toBeNull();
 });
 
 it('rejects incomplete list audience definitions', function (): void {
