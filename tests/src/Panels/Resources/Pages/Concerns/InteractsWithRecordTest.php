@@ -2,6 +2,7 @@
 
 use Filament\Actions\ForceDeleteAction;
 use Filament\Facades\Filament;
+use Filament\Resources\Events\ResourceListChanged;
 use Filament\Support\Enums\ModelEvent;
 use Filament\Support\Events\RecordChangedBroadcast;
 use Filament\Support\Facades\FilamentRealtime;
@@ -38,7 +39,7 @@ beforeEach(function (): void {
         ],
     ]);
 
-    Event::fake([RecordChangedBroadcast::class]);
+    Event::fake([RecordChangedBroadcast::class, ResourceListChanged::class]);
 });
 
 it('automatically enables page updates using the effective model subscription and panel broadcasting', function (): void {

@@ -12,6 +12,7 @@ use Illuminate\Database\Eloquent\Relations\HasOneOrManyThrough;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use LogicException;
+use ReflectionMethod;
 use Znck\Eloquent\Relations\BelongsToThrough;
 
 /**
@@ -87,6 +88,38 @@ trait BelongsToTenant
     public static function getTenantOwnershipRelationshipName(): string
     {
         return static::$tenantOwnershipRelationshipName ?? Filament::getTenantOwnershipRelationshipName();
+    }
+
+    /** @internal */
+    public static function getListBroadcastTenantRelationship(Panel $panel, Model $record): ?BelongsTo
+    {
+        // A worker has no current panel or tenant. Only infer ownership for
+        // the built-in resource scope and an unambiguous foreign key.
+        if ($record::class === $panel->getTenantModel()) {
+            return null;
+        }
+
+        foreach (['registerTenancyModelGlobalScope', 'scopeEloquentQueryToTenant', 'getTenantOwnershipRelationship', 'getTenantOwnershipRelationshipName'] as $method) {
+            if ((new ReflectionMethod(static::class, $method))->getDeclaringClass()->getName() !== self::class) {
+                return null;
+            }
+        }
+
+        $name = static::$tenantOwnershipRelationshipName ?? $panel->getTenantOwnershipRelationshipName();
+
+        if ($record->hasAttribute($name) || (! $record->isRelation($name))) {
+            return null;
+        }
+
+        $relationship = $record->{$name}();
+
+        if ((! $relationship instanceof BelongsTo) || ($relationship instanceof MorphTo)) {
+            return null;
+        }
+
+        $related = $relationship->getRelated();
+
+        return (($related::class === $panel->getTenantModel()) && ($related->getKeyName() === $relationship->getOwnerKeyName())) ? $relationship : null;
     }
 
     public static function getTenantOwnershipRelationship(Model $record): Relation

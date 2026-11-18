@@ -15,7 +15,7 @@ FilamentRealtime::subscribe(Post::class);
 
 Filament dispatches a `RecordChanged` Laravel event for each matching model event. Notifications follow Laravel's after-commit event behavior: they wait until commit and are discarded on rollback. Outside a transaction, they are dispatched immediately.
 
-With [websockets configured in your panel](../notifications/broadcast-notifications#setting-up-websockets-in-a-panel), these notifications also [keep resource record pages up to date](#refreshing-resource-pages).
+With [websockets configured in your panel](../notifications/broadcast-notifications#setting-up-websockets-in-a-panel), these notifications also keep [record pages](#refreshing-resource-pages) and [read-only resource lists](#refreshing-resource-lists) up to date.
 
 ## Selecting models
 
@@ -282,6 +282,21 @@ Registering a handler does not itself enable listening; also call `receiveRecord
 ### Authorizing subscriptions
 
 Broadcasts contain no model attributes and use private record-specific channels. Filament authorizes subscriptions through the resource page or mounted action and rechecks record scope and access when refreshing. You do not need a channel authorization callback for these built-in subscriptions; your own channels still need their own authorization. Records that can no longer be resolved or authorized leave the current screen and unsaved input in place.
+
+## Refreshing resource lists
+
+A read-only resource list uses the same model subscription and panel websocket configuration as a record page. After a change, it runs its existing table query with the current tab, search, filters, sort and page. An inserted row can enter the page and a deleted row can leave it. Filament keeps the page number even if the last page becomes empty.
+
+The list listens on a private channel for the model and database, scoped to the tenant for a tenant-scoped resource. The signal has an empty payload. Filament checks access to the list when signing the subscription and on each refresh. Keep your row visibility rules in the list query, just as you would for a normal page load.
+
+> [!WARNING]
+> Every subscribed reader in the same tenant can observe **when** the model changes, even if their query excludes the changed record. For a resource without tenant scoping, readers can observe model-wide activity. Only enable broadcasting for these readers if sharing activity timing is acceptable. Revoking access prevents subsequent authorized reads and subscriptions. An already-connected socket can still receive empty signals until it disconnects.
+
+Changes coalesce while a request is in flight. The list waits at least one second after each check before checking again. It also waits while the tab is hidden, rows are selected, a search or filter is being edited, the table is being reordered, or a modal is open. It catches up when the interaction ends or the subscription reconnects. The modal's own record updates continue independently.
+
+For plain text columns, Filament can skip rendering when the ordered rows, their attributes and column values, and the pagination counts match the last render. Formatted or custom columns, summaries, grouping and custom content use a normal render. Each active reader still incurs the cost of their own query. Changes to related models, external presentation state or widgets are not tracked as dependencies. To notify a list after a related or bulk write, [dispatch a change for the list's model](#dispatching-changes-manually).
+
+Automatic list updates apply to the panel's primary registered resource for the model, on a root, query-backed list. Inline-editable columns, cursor pagination and custom record sources keep their existing behavior. Tenant routing requires Filament's built-in scope and a direct `BelongsTo` foreign key to the tenant's primary key. A job can route the signal using that key without a current tenant. Other ownership relationships don't subscribe. A tenant transfer signals only the new owner’s tenant, so the previous tenant may need to reload.
 
 ## Listening for changes
 

@@ -30,16 +30,19 @@ use Filament\Livewire\ScopedModelPropertiesComponentHook;
 use Filament\Livewire\ValidatePanelOrigin;
 use Filament\Navigation\NavigationManager;
 use Filament\Queue\Middleware\RestoreImportTenant;
+use Filament\Resources\Events\ResourceListChanged;
 use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Support\Assets\Font;
 use Filament\Support\Assets\Js;
 use Filament\Support\Assets\Theme;
+use Filament\Support\Events\RecordChanged;
 use Filament\Support\Facades\FilamentAsset;
 use Filament\View\LegacyComponents;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Filesystem\Filesystem;
 use Illuminate\Routing\Router;
 use Illuminate\Support\Facades\Blade;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\RateLimiter;
 use Livewire\Component;
 use Livewire\Livewire;
@@ -123,6 +126,8 @@ class FilamentServiceProvider extends PackageServiceProvider
     public function packageBooted(): void
     {
         ValidatePanelOrigin::register();
+
+        Event::listen(RecordChanged::class, ResourceListChanged::dispatchForRecord(...));
 
         Livewire::listen('hydrate', static function (Component $component, array $memo): void {
             // Livewire skips lifecycle hooks for lazy components that have not mounted yet.
