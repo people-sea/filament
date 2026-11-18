@@ -4,6 +4,7 @@
 
 @php
     use Filament\Pages\Enums\SubNavigationPosition;
+    use Filament\Resources\Pages\ListRecords;
     use Filament\Support\Facades\FilamentView;
     use Filament\Tables\Contracts\HasTable;
     use Filament\View\PanelsRenderHook;
@@ -31,6 +32,18 @@
         ])
     }}
 >
+    @if ($this instanceof ListRecords && ($listChannel = $this->getListUpdateChannel()))
+        <div
+            hidden
+            wire:key="{{ $this->getId() }}.{{ $listChannel }}"
+            data-page-fingerprint="{{ $this->getListPageFingerprint() }}"
+            x-data="filamentListPage({
+                        channel: @js($listChannel),
+                        echoConfiguration: @js(config('filament.broadcasting.echo')),
+                    })"
+        ></div>
+    @endif
+
     {{ FilamentView::renderHook(PanelsRenderHook::PAGE_START, scopes: $this->getRenderHookScopes()) }}
 
     <div class="fi-page-header-main-ctn">

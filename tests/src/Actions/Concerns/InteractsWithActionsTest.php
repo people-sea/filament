@@ -7,6 +7,7 @@ use Filament\Actions\ViewAction;
 use Filament\Facades\Filament;
 use Filament\Forms\Components\TextInput;
 use Filament\Infolists\Components\TextEntry;
+use Filament\Resources\Events\ResourceListChanged;
 use Filament\Schemas\Schema;
 use Filament\Support\Enums\ModelEvent;
 use Filament\Support\Events\RecordChangedBroadcast;
@@ -329,7 +330,7 @@ describe('record updates', function (): void {
             ],
         ]);
 
-        Event::fake([RecordChangedBroadcast::class]);
+        Event::fake([RecordChangedBroadcast::class, ResourceListChanged::class]);
     });
 
     it('enables modal updates only for an effective subscription and configured broadcasting', function (): void {
