@@ -3,14 +3,12 @@ import eventListener from '../../../../support/resources/js/utilities/event-list
 export default ({ channel, echoConfiguration }) => {
     let owner
     let listener
-    let interaction = 0
     let userRequests = 0
     let nextRefresh = 0
     let pending = false
     let refreshing = false
     let timer
     let removeInterceptor
-    const lifetime = new AbortController()
     const authorizationMethod = 'authorizeListUpdates'
     const refreshMethod = 'refreshList'
 
@@ -34,10 +32,6 @@ export default ({ channel, echoConfiguration }) => {
             state?.areFiltersOpen ||
             (filters && window.Alpine.$data(filters).isOpen) ||
             document.querySelector('.fi-modal-open, dialog[open]') ||
-            (root.contains(document.activeElement) &&
-                document.activeElement.matches(
-                    'input:not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable="true"]',
-                )) ||
             (wire.tableDeferredFilters != null &&
                 JSON.stringify(wire.tableDeferredFilters) !==
                     JSON.stringify(wire.tableFilters))
@@ -95,21 +89,7 @@ export default ({ channel, echoConfiguration }) => {
         },
         init() {
             owner = this
-            const interacted = () => {
-                interaction++
-                queueMicrotask(flush)
-            }
-            const options = { capture: true, signal: lifetime.signal }
-            for (const event of [
-                'input',
-                'change',
-                'focusin',
-                'focusout',
-                'click',
-            ]) {
-                this.$wire.$el.addEventListener(event, interacted, options)
-            }
-            document.addEventListener('visibilitychange', interacted, options)
+            document.addEventListener('visibilitychange', flush)
 
             removeInterceptor = this.$wire.$interceptMessage(
                 ({ message, onSend, onSuccess, onFinish, cancel }) => {
@@ -123,7 +103,6 @@ export default ({ channel, echoConfiguration }) => {
                                 ) && params[0] === channel,
                         )
                     if (!listOnly) {
-                        interaction++
                         userRequests++
                         onFinish(() => {
                             userRequests--
@@ -133,7 +112,6 @@ export default ({ channel, echoConfiguration }) => {
                     }
 
                     const currentListener = listener
-                    const revision = interaction
                     const discardIfStale = () => {
                         if (
                             !owner?.$el.isConnected ||
@@ -141,7 +119,7 @@ export default ({ channel, echoConfiguration }) => {
                             listener !== currentListener
                         )
                             return cancel()
-                        if (revision === interaction && !paused()) return
+                        if (!paused()) return
 
                         cancel()
                         if (
@@ -170,7 +148,7 @@ export default ({ channel, echoConfiguration }) => {
             clearTimeout(timer)
             listener?.destroy()
             removeInterceptor()
-            lifetime.abort()
+            document.removeEventListener('visibilitychange', flush)
         },
     }
 }

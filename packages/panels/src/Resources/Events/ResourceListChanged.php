@@ -20,8 +20,9 @@ class ResourceListChanged implements ShouldBroadcast
     public static function dispatchForRecord(RecordChanged $event): void
     {
         $eventName = $event->getEvent();
+        $eventName = ($eventName instanceof BackedEnum) ? (string) $eventName->value : $eventName;
 
-        if ((! config('filament.broadcasting.echo')) || ((($eventName instanceof BackedEnum) ? $eventName->value : $eventName) === 'retrieved')) {
+        if ((! config('filament.broadcasting.echo')) || ($eventName === 'retrieved')) {
             return;
         }
 
@@ -35,7 +36,7 @@ class ResourceListChanged implements ShouldBroadcast
                 continue;
             }
 
-            if ($channel = static::getChannel($panel, $resource, $record)) {
+            foreach (static::getChannels($panel, $resource, $record, eventName: $eventName) as $channel) {
                 $channels[$channel] = $channel;
             }
         }
@@ -48,26 +49,63 @@ class ResourceListChanged implements ShouldBroadcast
     /** @param class-string<PanelResource> $resource */
     public static function getChannel(Panel $panel, string $resource, Model $model, ?Model $tenant = null): ?string
     {
+        return static::getChannels($panel, $resource, $model, $tenant)[0] ?? null;
+    }
+
+    /**
+     * @param  class-string<PanelResource>  $resource
+     * @return array<string>
+     */
+    protected static function getChannels(Panel $panel, string $resource, Model $model, ?Model $tenant = null, ?string $eventName = null): array
+    {
         $scope = [$model::class, $model->getConnection()->getName(), $model->getConnection()->getDatabaseName()];
 
-        if ($panel->hasTenancy() && $resource::isScopedToTenant()) {
-            $relationship = $resource::getListBroadcastTenantRelationship($panel, $model);
-
-            if (! $relationship) {
-                return null;
-            }
-
-            $owner = $tenant ?? $relationship->getRelated();
-            $key = $tenant ? $tenant->getKey() : ($model->getAttributes()[$relationship->getForeignKeyName()] ?? null);
-
-            if (($owner::class !== $panel->getTenantModel()) || blank($key)) {
-                return null;
-            }
-
-            $scope[] = [$owner::class, $owner->getConnection()->getName(), $owner->getConnection()->getDatabaseName(), $relationship->getForeignKeyName(), (string) $key];
+        if ((! $panel->hasTenancy()) || (! $resource::isScopedToTenant())) {
+            return ['filament.lists.' . hash('sha256', serialize($scope))];
         }
 
-        return 'filament.lists.' . hash('sha256', serialize($scope));
+        $relationship = $resource::getListBroadcastTenantRelationship($panel, $model);
+
+        if (! $relationship) {
+            return [];
+        }
+
+        $owner = $tenant ?? $relationship->getRelated();
+
+        if ($owner::class !== $panel->getTenantModel()) {
+            return [];
+        }
+
+        $foreignKey = $relationship->getForeignKeyName();
+
+        if ($tenant) {
+            $keys = [$tenant->getKey()];
+        } else {
+            $attributes = in_array($eventName, ['deleted', 'trashed', 'forceDeleted'], strict: true)
+                ? $model->getRawOriginal()
+                : $model->getAttributes();
+
+            if ($model->exists && (! array_key_exists($foreignKey, $attributes))) {
+                $attributes[$foreignKey] = $model->newModelQuery()->whereKey($model->getKey())->toBase()->useWritePdo()->value($foreignKey);
+            }
+
+            $keys = [$attributes[$foreignKey] ?? null];
+
+            if (in_array($eventName, ['updated', 'saved'], strict: true) && $model->wasChanged($foreignKey)) {
+                $keys[] = $model->getRawOriginal($foreignKey);
+            }
+        }
+
+        $channels = [];
+
+        foreach (array_unique($keys) as $key) {
+            if (filled($key)) {
+                $tenantScope = [$owner::class, $owner->getConnection()->getName(), $owner->getConnection()->getDatabaseName(), $foreignKey, (string) $key];
+                $channels[] = 'filament.lists.' . hash('sha256', serialize([...$scope, $tenantScope]));
+            }
+        }
+
+        return $channels;
     }
 
     /** @return array<PrivateChannel> */

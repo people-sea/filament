@@ -111,7 +111,7 @@ trait BelongsToTenant
             return null;
         }
 
-        $relationship = $record->{$name}();
+        $relationship = Relation::noConstraints(static fn () => $record->{$name}());
 
         if ((! $relationship instanceof BelongsTo) || ($relationship instanceof MorphTo)) {
             return null;

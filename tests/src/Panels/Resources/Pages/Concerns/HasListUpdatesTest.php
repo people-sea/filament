@@ -2,11 +2,13 @@
 
 use Filament\Facades\Filament;
 use Filament\Resources\Events\ResourceListChanged;
+use Filament\Schemas\Components\Tabs\Tab;
 use Filament\Support\Enums\ModelEvent;
 use Filament\Support\Events\RecordChanged;
 use Filament\Support\Events\RecordChangedBroadcast;
 use Filament\Support\Facades\FilamentRealtime;
 use Filament\Support\Facades\FilamentView;
+use Filament\Tables\Columns\Summarizers\Sum;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\TextInputColumn;
 use Filament\Tables\Table;
@@ -16,14 +18,18 @@ use Filament\Tests\Fixtures\Models\Ticket;
 use Filament\Tests\Fixtures\Models\User;
 use Filament\Tests\Fixtures\Policies\TicketPolicy;
 use Filament\Tests\Fixtures\Resources\Posts\Pages\ListPosts;
+use Filament\Tests\Fixtures\Resources\Posts\Pages\ListPostsWithTabs;
 use Filament\Tests\Fixtures\Resources\Posts\PostResource;
 use Filament\Tests\Fixtures\Resources\Tickets\Pages\ListTickets;
 use Filament\Tests\Panels\Resources\TestCase;
 use Filament\View\PanelsRenderHook;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Support\HtmlString;
 
 use function Filament\Tests\livewire;
@@ -74,15 +80,66 @@ it('rechecks the filtered and sorted page and renders only changed rows or pagin
     expect($page->effects)->toHaveKey('html');
 });
 
-it('renders custom column state even when the visible models have not changed', function (): void {
+it('compares loaded records and nested relations without evaluating column state', function (): void {
     FilamentRealtime::subscribe(Post::class);
-    Post::factory()->create();
-    TextColumn::configureUsing(static fn (TextColumn $column) => $column->state(static fn (): string => config('list-test-value')));
-    config(['list-test-value' => 'First value']);
-    $page = livewire(ListPosts::class)->assertSee('First value');
-    config(['list-test-value' => 'Changed elsewhere']);
-    $page->call('refreshList', $page->instance()->getListUpdateChannel(), $page->instance()->getListPageFingerprint())
-        ->assertSee('Changed elsewhere');
+    $post = Post::factory()->create(['is_published' => true]);
+    Table::configureUsing(static fn (Table $table) => $table->modifyQueryUsing(static fn (Builder $query) => $query->where('is_published', true)->with([
+        'author.posts' => static fn (HasMany $posts) => $posts->chaperone('author')->orderBy('id'),
+    ])));
+    TextColumn::configureUsing(static fn (TextColumn $column) => $column->state(static fn (Post $record): string => $record->author->posts->pluck('title')->join(', ')));
+    $page = livewire(ListPosts::class)->assertSee($post->title);
+    $channel = $page->instance()->getListUpdateChannel();
+    $fingerprint = $page->instance()->getListPageFingerprint();
+    $page->call('refreshList', $channel, $fingerprint);
+    expect($page->effects)->not->toHaveKey('html');
+
+    $draft = Post::factory()->create(['author_id' => $post->author_id, 'is_published' => false, 'title' => 'Related draft']);
+    $page->call('refreshList', $channel, $fingerprint)->assertSee('Related draft')->assertCanNotSeeTableRecords([$draft]);
+    $fingerprint = $page->instance()->getListPageFingerprint();
+    $draft->update(['title' => 'Related revision']);
+    $page->call('refreshList', $channel, $fingerprint)->assertSee('Related revision');
+});
+
+it('always renders table summaries on list checks', function (): void {
+    FilamentRealtime::subscribe(Post::class);
+    $post = Post::factory()->create(['rating' => 41]);
+    $page = livewire(ListPostsWithSummary::class)->assertSee('$41.00');
+    $channel = $page->instance()->getListUpdateChannel();
+    $page->call('refreshList', $channel, $page->instance()->getListPageFingerprint());
+    expect($page->effects)->toHaveKey('html');
+
+    $post->update(['rating' => 52]);
+    $page->call('refreshList', $channel, $page->instance()->getListPageFingerprint())->assertSee('$52.00');
+});
+
+it('renders only when the active page or a displayed tab count changes', function (): void {
+    FilamentRealtime::subscribe(Post::class);
+    $published = Post::factory()->create(['is_published' => true]);
+    $draft = Post::factory()->create(['is_published' => false, 'rating' => 0]);
+    $page = livewire(ListPostsWithTabCounts::class)->assertCanSeeTableRecords([$published]);
+    $channel = $page->instance()->getListUpdateChannel();
+    $fingerprint = $page->instance()->getListPageFingerprint();
+
+    $draft->update(['rating' => 5]);
+    $page->call('refreshList', $channel, $fingerprint);
+    expect($page->effects)->not->toHaveKey('html')->and($page->effects['partials'] ?? [])->toBeEmpty();
+
+    $page->call('callSchemaComponentMethod', 'content.resourceTabs', 'getLazyLoadedTabBadges')
+        ->assertReturned(fn (array $badges): bool => $badges['lazy']['badge'] === '1');
+    $page->call('refreshList', $channel, $fingerprint);
+    expect($page->effects)->not->toHaveKey('html')->and($page->effects['partials'] ?? [])->toBeEmpty();
+
+    $draft->update(['rating' => 0]);
+    $page->call('refreshList', $channel, $fingerprint)->assertSet('activeTab', 'published')->assertCanNotSeeTableRecords([$draft]);
+    expect($page->effects)->toHaveKey('html');
+
+    $fingerprint = $page->instance()->getListPageFingerprint();
+    $page->call('refreshList', $channel, $fingerprint);
+    expect($page->effects)->not->toHaveKey('html')->and($page->effects['partials'] ?? [])->toBeEmpty();
+
+    $draft->delete();
+    $page->call('refreshList', $channel, $fingerprint);
+    expect($page->effects)->toHaveKey('html');
 });
 
 it('shares only an empty signal within a tenant and keeps each reader’s row scope', function (): void {
@@ -136,6 +193,56 @@ it('shares only an empty signal within a tenant and keeps each reader’s row sc
     $page->call('refreshList', $channel, $fingerprint)->assertSee('Private draft revision');
 });
 
+it('routes updates in strict mode and notifies the original tenant when its key was loaded', function (array $columns, array $transferRecipients, ModelEvent $event): void {
+    $tenants = ['A' => User::factory()->create(), 'B' => User::factory()->create(), 'C' => User::factory()->create()];
+    $post = Post::factory()->create(['author_id' => $tenants['A']->getKey()]);
+    $panel = Filament::getPanel('tenancy')->tenant(User::class, ownershipRelationship: 'author');
+    Filament::setCurrentPanel($panel);
+    PostResource::registerTenancyModelGlobalScope($panel);
+    FilamentRealtime::subscribe(Post::class)->onlyEvents([$event]);
+
+    $channels = [];
+    foreach ($tenants as $label => $tenant) {
+        Filament::setTenant($tenant);
+        $channels[$label] = 'private-' . livewire(ListPosts::class)->instance()->getListUpdateChannel();
+    }
+
+    $record = Post::withoutGlobalScopes()->select($columns)->findOrFail($post->getKey());
+    $wasStrict = Model::preventsAccessingMissingAttributes();
+    Model::preventAccessingMissingAttributes();
+
+    try {
+        DB::beginTransaction();
+
+        try {
+            (clone $record)->update(['author_id' => $tenants['C']->getKey()]);
+        } finally {
+            DB::rollBack();
+        }
+
+        $record->update(['title' => 'Rename in A']);
+
+        DB::transaction(function () use ($record, $tenants): void {
+            $record->update(['author_id' => $tenants['B']->getKey()]);
+            $record->update(['title' => 'Rename in B']);
+            Event::assertDispatchedTimes(ResourceListChanged::class, 1);
+        });
+    } finally {
+        Model::preventAccessingMissingAttributes($wasStrict);
+    }
+
+    $recipients = Event::dispatched(ResourceListChanged::class)->pluck(0)->map(static function (ResourceListChanged $event) use ($channels): array {
+        $destinations = array_map(strval(...), $event->broadcastOn());
+
+        return array_keys(array_intersect($channels, $destinations));
+    });
+
+    expect($recipients->all())->toBe([['A'], $transferRecipients, ['B']]);
+})->with([
+    'tenant key not selected' => [['id', 'title'], ['B']],
+    'tenant key selected' => [['id', 'title', 'author_id'], ['A', 'B']],
+])->with([ModelEvent::Updated, ModelEvent::Saved]);
+
 it('checks the effective subscription and current resource access on every refresh and signing request', function (string $method, ?string $argument): void {
     $page = livewire(ListTickets::class);
     expect($page->instance()->getListUpdateChannel())->toBeNull();
@@ -163,10 +270,9 @@ it('leaves inline-editable lists alone', function (): void {
     expect(livewire(ListPostsWithEditableColumn::class)->instance()->getListUpdateChannel())->toBeNull();
 });
 
-it('catches up after deselection and resubscription without remounting the list', function (): void {
+function enableListUpdateBrowserSignals(): void
+{
     Artisan::call('filament:assets');
-    FilamentRealtime::subscribe(Post::class)->onlyEvents([ModelEvent::Updated]);
-    $post = Post::factory()->create(['title' => 'Original title']);
 
     // Drive Echo delivery explicitly. Signing, Livewire transport and the table are real.
     FilamentView::registerRenderHook(PanelsRenderHook::SCRIPTS_AFTER, static fn (): HtmlString => new HtmlString(<<<'HTML'
@@ -197,6 +303,35 @@ it('catches up after deselection and resubscription without remounting the list'
             }
         </script>
         HTML));
+}
+
+it('updates eager and lazy inactive tab counts without changing the active list', function (): void {
+    enableListUpdateBrowserSignals();
+    FilamentRealtime::subscribe(Post::class);
+    $published = Post::factory()->create(['is_published' => true]);
+    $draft = Post::factory()->create(['is_published' => false, 'rating' => 0]);
+    Route::get('/live-post-counts', ListPostsWithTabCounts::class)->middleware(Filament::getPanel('admin')->getMiddleware());
+
+    $page = visit('/live-post-counts');
+    $page->assertScript('window.listTestDelivery?.subscribed', true)
+        ->assertSeeIn('[data-tab-key=draft]', '1')->assertSeeIn('[data-tab-key=lazy]', '0');
+    $draft->update(['rating' => 5]);
+    $page->script('window.listTestDelivery.notify({}); undefined');
+    $page->assertSeeIn('[data-tab-key=lazy]', '1')->assertSeeIn('[data-tab-key=draft]', '1');
+
+    Post::factory()->create(['is_published' => false, 'rating' => 0]);
+    $page->script('window.listTestDelivery.notify({}); undefined');
+    $page->assertSeeIn('[data-tab-key=draft]', '2')->assertSeeIn('[data-tab-key=lazy]', '1')
+        ->assertSee($published->title)->assertDontSee($draft->title)->assertNoAccessibilityIssues();
+
+    $darkPage = $page->inDarkMode();
+    $darkPage->assertSeeIn('[data-tab-key=lazy]', '1')->assertNoAccessibilityIssues();
+});
+
+it('applies in-flight updates when idle and catches up after deselection and resubscription', function (): void {
+    enableListUpdateBrowserSignals();
+    FilamentRealtime::subscribe(Post::class)->onlyEvents([ModelEvent::Updated]);
+    $post = Post::factory()->create(['title' => 'Original title']);
 
     $page = visit(PostResource::getUrl())->assertScript('window.listTestDelivery?.subscribed', true);
     $checkbox = 'tbody input[type="checkbox"][value="' . $post->getKey() . '"]';
@@ -212,6 +347,42 @@ it('catches up after deselection and resubscription without remounting the list'
     $page->assertNoAccessibilityIssues()->assertSee('Revised while selected')->assertChecked($checkbox)
         ->uncheck($checkbox)->assertSee('Changed while disconnected');
 
+    $holdListUpdate = <<<'JS'
+        window.releaseListResponse = null
+        window.listResponseFinished = false
+        const stop = Livewire.interceptMessage(({ onFinish }) => {
+            stop()
+            onFinish(() => window.listResponseFinished = true)
+        })
+        const originalFetch = window.fetch
+        window.fetch = async (...parameters) => {
+            window.fetch = originalFetch
+            const response = await originalFetch(...parameters)
+            await new Promise(resolve => window.releaseListResponse = resolve)
+            return response
+        }
+        void window.listTestDelivery.notify({})
+        JS;
+
+    $search = 'main input[type="search"]';
+    $page->fill($search, 'Revision')->assertNotPresent($checkbox);
+
+    $post->update(['title' => 'Revision in flight']);
+    $page->script($holdListUpdate);
+    $page->assertScript('typeof window.releaseListResponse', 'function')->click($search);
+
+    // Retrying because of the click would lose the matching row in the held response.
+    $post->delete();
+    $page->script('window.releaseListResponse()');
+    $page->assertSee('Revision in flight')->assertPresent($search . ':focus')->assertValue($search, 'Revision');
+
+    $page->script($holdListUpdate);
+    $page->assertScript('typeof window.releaseListResponse', 'function')->check($checkbox);
+    $page->script('window.releaseListResponse()');
+    $page->assertScript('window.listResponseFinished')->assertSee('Revision in flight')->assertChecked($checkbox)
+        ->uncheck($checkbox)->assertNotPresent($checkbox);
+
+    $post->restore();
     $darkPage = visit(PostResource::getUrl())->inDarkMode()->assertScript('window.listTestDelivery?.subscribed', true);
     $darkPage->check($checkbox)->assertChecked($checkbox)->assertNoAccessibilityIssues();
 });
@@ -221,5 +392,29 @@ class ListPostsWithEditableColumn extends ListPosts
     public function table(Table $table): Table
     {
         return $table->columns([TextInputColumn::make('title')]);
+    }
+}
+
+class ListPostsWithSummary extends ListPosts
+{
+    public function table(Table $table): Table
+    {
+        return $table->columns([TextColumn::make('title'), TextColumn::make('rating')->summarize(Sum::make()->money('USD'))]);
+    }
+}
+
+class ListPostsWithTabCounts extends ListPostsWithTabs
+{
+    public function getTabs(): array
+    {
+        $tabs = parent::getTabs();
+        $drafts = static fn (ListPostsWithTabs $livewire): Builder => $livewire->getResource()::getEloquentQuery()->where('is_published', false);
+        $tabs['draft']->badge(static fn (ListPostsWithTabs $livewire): int => $drafts($livewire)->count());
+        $tabs['lazy'] = Tab::make('Top-rated drafts')
+            ->badge(static fn (ListPostsWithTabs $livewire): int => $drafts($livewire)->where('rating', 5)->count())
+            ->lazyLoadedBadge();
+        $tabs['hidden'] = Tab::make('Hidden')->hidden()->badge(static fn () => throw new LogicException('A hidden badge was evaluated.'));
+
+        return $tabs;
     }
 }

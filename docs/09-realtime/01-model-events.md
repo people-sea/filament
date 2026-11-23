@@ -292,11 +292,21 @@ The list listens on a private channel for the model and database, scoped to the 
 > [!WARNING]
 > Every subscribed reader in the same tenant can observe **when** the model changes, even if their query excludes the changed record. For a resource without tenant scoping, readers can observe model-wide activity. Only enable broadcasting for these readers if sharing activity timing is acceptable. Revoking access prevents subsequent authorized reads and subscriptions. An already-connected socket can still receive empty signals until it disconnects.
 
-Changes coalesce while a request is in flight. The list waits at least one second after each check before checking again. It also waits while the tab is hidden, rows are selected, a search or filter is being edited, the table is being reordered, or a modal is open. It catches up when the interaction ends or the subscription reconnects. The modal's own record updates continue independently.
+Changes coalesce while a request is in flight. The list waits at least one second after each check before checking again. It also waits while the tab is hidden, rows are selected, filters are open or have unapplied changes, the table is being reordered, or a modal is open. It catches up when the interaction ends or the subscription reconnects. The modal's own record updates continue independently.
 
-For plain text columns, Filament can skip rendering when the ordered rows, their attributes and column values, and the pagination counts match the last render. Formatted or custom columns, summaries, grouping and custom content use a normal render. Each active reader still incurs the cost of their own query. Changes to related models, external presentation state or widgets are not tracked as dependencies. To notify a list after a related or bulk write, [dispatch a change for the list's model](#dispatching-changes-manually).
+Keeping focus in the search field does not pause updates. If you configure `searchOnBlur()`, a list update can apply the text already typed in the field before it loses focus.
 
-Automatic list updates apply to the panel's primary registered resource for the model, on a root, query-backed list. Inline-editable columns, cursor pagination and custom record sources keep their existing behavior. Tenant routing requires Filament's built-in scope and a direct `BelongsTo` foreign key to the tenant's primary key. A job can route the signal using that key without a current tenant. Other ownership relationships don't subscribe. A tenant transfer signals only the new owner’s tenant, so the previous tenant may need to reload.
+Filament skips rendering the list when the ordered records, their raw attributes, their already-loaded relationships, the pagination counts, and the displayed resource tab badge values match. This applies to formatted columns such as dates and money, too. If only the Draft tab's count changes, the list renders with the new count and keeps the active tab. A [lazy-loaded tab badge](../resources/listing-records#lazy-loading-filter-tab-badges) joins the comparison after its first load. Tables with summaries, grouping, column layouts, or custom content still render on every check.
+
+Each active reader still runs their own list query. Filament does not evaluate column callbacks to detect changes to external state, such as the current time or a value read from a service. Eager-load relationships that your columns depend on. A related model change does not itself notify the list; after a related or bulk write, you can [dispatch a change for the list's model](#dispatching-changes-manually).
+
+Automatic list updates apply to the panel's primary registered resource for the model, on a root, query-backed list. Inline-editable columns, cursor pagination and custom record sources keep their existing behavior.
+
+Tenant routing requires Filament's built-in scope and a direct `BelongsTo` foreign key to the tenant's primary key. Other ownership relationships don't subscribe. If you update a record without selecting its tenant key, Filament looks up the current owner on the write connection when it sends the signal. No current panel tenant is needed.
+
+Select the tenant key before transferring or permanently deleting a record. On an observed `updated` or `saved` event, a transfer notifies the new tenant and the tenant in the model's original attributes. If you didn't load the key, only the new tenant is notified; after a hard delete, there's no row left to look up. A lookup after a bulk transfer can't recover the previous owner either.
+
+If transfers can race, load the record with `lockForUpdate()` inside the transaction that transfers it. Otherwise, a stale original key can notify the wrong former tenant.
 
 ## Listening for changes
 
