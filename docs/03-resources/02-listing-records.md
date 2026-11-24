@@ -234,3 +234,5 @@ This assumes that you have created a view at `resources/views/filament/resources
     {{ $this->content }} {{-- This will render the content of the page defined in the `content()` method, which can be removed if you want to start from scratch --}}
 </x-filament-panels::page>
 ```
+
+Put your own Alpine `x-data` on a child of `<x-filament-panels::page>`. Filament uses the page root's `x-data` for [live list updates](../realtime/model-events#refreshing-resource-lists).

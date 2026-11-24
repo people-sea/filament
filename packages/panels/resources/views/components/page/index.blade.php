@@ -21,6 +21,12 @@
                     channel: @js($this->getRecordBroadcastChannel()),
                     echoConfiguration: @js(config('filament.broadcasting.echo')),
                 })"
+    @elseif ($this instanceof ListRecords && ($listChannel = $this->getListUpdateChannel()))
+        data-page-fingerprint="{{ $this->getListPageFingerprint() }}"
+        x-data="filamentListPage({
+                    channel: @js($listChannel),
+                    echoConfiguration: @js(config('filament.broadcasting.echo')),
+                })"
     @endif
     {{
         $attributes->class([
@@ -32,18 +38,6 @@
         ])
     }}
 >
-    @if ($this instanceof ListRecords && ($listChannel = $this->getListUpdateChannel()))
-        <div
-            hidden
-            wire:key="{{ $this->getId() }}.{{ $listChannel }}"
-            data-page-fingerprint="{{ $this->getListPageFingerprint() }}"
-            x-data="filamentListPage({
-                        channel: @js($listChannel),
-                        echoConfiguration: @js(config('filament.broadcasting.echo')),
-                    })"
-        ></div>
-    @endif
-
     {{ FilamentView::renderHook(PanelsRenderHook::PAGE_START, scopes: $this->getRenderHookScopes()) }}
 
     <div class="fi-page-header-main-ctn">
