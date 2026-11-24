@@ -51,7 +51,11 @@ trait HasListUpdates
         if (
             ($panel->getModelResource($resource::getModel()) !== $resource) ||
             $resource::getParentResourceRegistration() ||
-            ($panel->hasTenancy() && $resource::isScopedToTenant() && (! $tenant)) ||
+            (
+                $panel->hasTenancy() &&
+                $resource::isScopedToTenant() &&
+                (! $tenant)
+            ) ||
             (! $table->isLoaded()) ||
             (! $table->hasQuery()) ||
             ($table->getPaginationMode() === PaginationMode::Cursor)
@@ -117,7 +121,10 @@ trait HasListUpdates
     #[Unexposed]
     public function renderingHasListUpdates(): void
     {
-        $this->renderedListTabBadges = ($this->getCachedTabs() && $this->getListUpdateChannel()) ? $this->getListTabBadges() : [];
+        $this->renderedListTabBadges = (
+            $this->getCachedTabs() &&
+            $this->getListUpdateChannel()
+        ) ? $this->getListTabBadges() : [];
     }
 
     /** @param array<string, mixed> $arguments */
@@ -158,7 +165,10 @@ trait HasListUpdates
             }
 
             if ($tab->isBadgeLazyLoaded()) {
-                if ((! array_key_exists($key, $this->renderedListTabBadges)) || ($this->renderedListTabBadges[$key] === false)) {
+                if (
+                    (! array_key_exists($key, $this->renderedListTabBadges)) ||
+                    ($this->renderedListTabBadges[$key] === false)
+                ) {
                     $badges[$key] = false;
 
                     continue;
@@ -185,7 +195,13 @@ trait HasListUpdates
     {
         $table = $this->getTable();
 
-        if ($table->getGrouping() || $table->hasColumnsLayout() || $table->hasSummary(null) || $table->getContent() || $table->getContentFooter()) {
+        if (
+            $table->getGrouping() ||
+            $table->hasColumnsLayout() ||
+            $table->hasSummary(null) ||
+            $table->getContent() ||
+            $table->getContentFooter()
+        ) {
             return null;
         }
 
@@ -194,7 +210,12 @@ trait HasListUpdates
         $seen = new WeakMap;
 
         if ($records instanceof Paginator) {
-            $page[] = [$records->currentPage(), $records->perPage(), $records->hasMorePages(), ($records instanceof LengthAwarePaginator) ? $records->total() : null];
+            $page[] = [
+                $records->currentPage(),
+                $records->perPage(),
+                $records->hasMorePages(),
+                ($records instanceof LengthAwarePaginator) ? $records->total() : null,
+            ];
         }
 
         foreach ($records as $record) {
@@ -222,7 +243,9 @@ trait HasListUpdates
         foreach ($record->getRelations() as $name => $relation) {
             $relations[$name] = match (true) {
                 $relation instanceof Model => $this->getListRecordFingerprintData($relation, $seen),
-                $relation instanceof Collection => $relation->map(fn (Model $relatedRecord): array => $this->getListRecordFingerprintData($relatedRecord, $seen))->all(),
+                $relation instanceof Collection => $relation
+                    ->map(fn (Model $relatedRecord): array => $this->getListRecordFingerprintData($relatedRecord, $seen))
+                    ->all(),
                 default => $relation,
             };
         }
