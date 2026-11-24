@@ -11,6 +11,7 @@ use Filament\Support\Facades\FilamentView;
 use Filament\Tables\Columns\Summarizers\Sum;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\TextInputColumn;
+use Filament\Tables\Filters\TrashedFilter;
 use Filament\Tables\Table;
 use Filament\Tests\Fixtures\Models\Post;
 use Filament\Tests\Fixtures\Models\Team;
@@ -580,6 +581,41 @@ it('updates eager and lazy inactive tab counts without changing the active list'
         ->assertNoAccessibilityIssues();
 });
 
+it('resumes list updates after a deferred filter is changed back without applying', function (): void {
+    enableListUpdateBrowserSignals();
+    FilamentRealtime::subscribe(Post::class)
+        ->onlyEvents([ModelEvent::Updated]);
+
+    $post = Post::factory()->create(['title' => 'Original title']);
+
+    Route::get('/live-post-filters', ListPostsWithDeferredFilters::class)
+        ->middleware(Filament::getPanel('admin')->getMiddleware());
+
+    $page = visit('/live-post-filters');
+    $page->assertScript('window.listTestDelivery?.subscribed', true);
+
+    $select = 'select[id="tableFiltersForm.trashed.value"]';
+
+    $page->click('button[aria-label="Filter"]')
+        ->select($select, '1')
+        ->assertSelected($select, '1');
+
+    $page->select($select, '')
+        ->assertSelected($select, '')
+        ->assertNoAccessibilityIssues();
+
+    $page->click('h1:first-of-type');
+
+    $post->update(['title' => 'Revised after reverting the filter']);
+    $page->script('window.listTestDelivery.notify({}); undefined');
+
+    $page->assertSee('Revised after reverting the filter');
+
+    $page->inDarkMode()
+        ->click('button[aria-label="Filter"]')
+        ->assertNoAccessibilityIssues();
+});
+
 it('applies in-flight updates when idle and catches up after deselection and resubscription', function (): void {
     enableListUpdateBrowserSignals();
     FilamentRealtime::subscribe(Post::class)
@@ -699,6 +735,16 @@ class ListPostsWithSummary extends ListPosts
             TextColumn::make('rating')
                 ->summarize(Sum::make()->money('USD')),
         ]);
+    }
+}
+
+class ListPostsWithDeferredFilters extends ListPosts
+{
+    public function table(Table $table): Table
+    {
+        return parent::table($table)
+            ->filters([TrashedFilter::make()])
+            ->deferFilters();
     }
 }
 

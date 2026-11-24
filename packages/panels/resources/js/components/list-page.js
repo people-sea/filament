@@ -11,6 +11,8 @@ export default ({ channel, echoConfiguration }) => {
     let removeInterceptor
     const authorizationMethod = 'authorizeListUpdates'
     const refreshMethod = 'refreshList'
+    const serializeFilters = (filters) =>
+        JSON.stringify(filters, (key, value) => (value === '' ? null : value))
 
     const paused = () => {
         const wire = owner.$wire
@@ -33,8 +35,8 @@ export default ({ channel, echoConfiguration }) => {
             (filters && window.Alpine.$data(filters).isOpen) ||
             document.querySelector('.fi-modal-open, dialog[open]') ||
             (wire.tableDeferredFilters != null &&
-                JSON.stringify(wire.tableDeferredFilters) !==
-                    JSON.stringify(wire.tableFilters))
+                serializeFilters(wire.tableDeferredFilters) !==
+                    serializeFilters(wire.tableFilters))
         )
     }
 
