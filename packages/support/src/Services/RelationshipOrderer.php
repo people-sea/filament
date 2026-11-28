@@ -35,6 +35,16 @@ class RelationshipOrderer
                 $columns,
             );
 
+            // Through relationships already recreate their leading joins in the existence query.
+            $throughJoinCount = match (true) {
+                $relationship instanceof HasOneThrough => 1,
+                $relationship instanceof BelongsToThrough => count($relationship->getThroughParents()),
+                default => 0,
+            };
+            $relationshipJoins = array_slice($relationshipQuery->getQuery()->joins ?? [], $throughJoinCount);
+            $relatedQuery->getQuery()->joins = [...($relatedQuery->getQuery()->joins ?? []), ...$relationshipJoins];
+            $relatedQuery->getQuery()->addBinding($relationshipQuery->getQuery()->getRawBindings()['join'], 'join');
+
             // Group relationship predicates so an `orWhere()` cannot bypass parent correlation.
             $relatedQuery->where(fn (EloquentBuilder $query) => $query->mergeConstraintsFrom($relationshipQuery));
             $relatedQuery->withoutGlobalScopes($relationshipQuery->removedScopes());
