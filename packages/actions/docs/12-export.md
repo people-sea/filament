@@ -1018,6 +1018,14 @@ public function view(User $user, Export $export): bool
 
 ## Security
 
+### Rechecking panel and tenant access
+
+For queued exports started while a Filament panel is current, Filament restores the originating panel and exporting user and rechecks `canAccessPanel()` before preparation, each chunk, XLSX generation, and completion. As with panel authentication, users who do not implement `FilamentUser` are only allowed in the `local` environment.
+
+For tenant-aware panels with a current tenant, these jobs also restore that tenant, boot tenancy, and check that the tenant still exists and the user can still access it using `canAccessTenant()`. If either access check is denied, the job fails before processing. This prevents denied jobs from generating further export files or sending a completion notification. It does not delete files already generated or change [download authorization](#authorization).
+
+Exports started outside a Filament panel do not receive these panel or tenant access checks. The restored context covers job handlers and the exporter callbacks they invoke, not custom exporter job middleware. For additional authorization checks during row processing, use [custom exporter job middleware](#customizing-the-export-job-middleware).
+
 ### Per-record authorization
 
 The export system does not perform per-record authorization checks. When an export is triggered, all records matching the table query (or the model's full dataset, if used outside a table) are included in the export without consulting your application's [Laravel policies](https://laravel.com/docs/authorization#creating-policies). This means that if a user is allowed to trigger an export, they may receive records they would not normally be authorized to view through your application's UI.

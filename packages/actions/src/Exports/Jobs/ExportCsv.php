@@ -18,6 +18,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use League\Csv\Writer;
 use League\Flysystem\UnableToWriteFile;
+use LogicException;
 use Throwable;
 
 class ExportCsv implements ShouldQueue
@@ -61,6 +62,11 @@ class ExportCsv implements ShouldQueue
         return $this->exporter->getJobMiddleware();
     }
 
+    public function getExport(): Export
+    {
+        return $this->export;
+    }
+
     public function handle(): void
     {
         if ($this->batch()?->cancelled()) {
@@ -70,9 +76,16 @@ class ExportCsv implements ShouldQueue
         /** @var Authenticatable $user */
         $user = $this->export->user;
 
-        auth()->setUser($user);
+        $guard = auth()->guard();
+        $previousUser = $guard->user();
+
+        if ((! $previousUser) && (! method_exists($guard, 'forgetUser'))) {
+            throw new LogicException('The export auth guard must implement [forgetUser()] to restore its guest state.');
+        }
 
         try {
+            $guard->setUser($user);
+
             $processedRows = 0;
             $successfulRows = 0;
 
@@ -135,7 +148,11 @@ class ExportCsv implements ShouldQueue
                 }
             });
         } finally {
-            auth()->forgetGuards();
+            if ($previousUser) {
+                $guard->setUser($previousUser);
+            } else {
+                $guard->forgetUser();
+            }
         }
     }
 

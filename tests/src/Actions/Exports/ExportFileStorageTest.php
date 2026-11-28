@@ -22,7 +22,7 @@ use OpenSpout\Reader\XLSX\Reader as XlsxReader;
 
 uses(TestCase::class);
 
-it('rejects a failed export file write and can execute the original serialized payload after recovery', function (string $stage, bool $throws): void {
+it('rejects a failed export file write and can execute the original serialized payload after recovery', function (string $stage, bool $hasPreviousUser, bool $throws): void {
     app()->bind(Authenticatable::class, User::class);
     Exceptions::fake();
     $disk = Storage::fake('local');
@@ -55,6 +55,15 @@ it('rejects a failed export file write and can execute the original serialized p
         'xlsx' => new CreateXlsxFile($export, $columnMap),
     };
     $payload = serialize($job);
+    $guard = auth()->guard();
+    $previousUser = $hasPreviousUser ? User::factory()->create() : null;
+
+    if ($previousUser) {
+        $guard->setUser($previousUser);
+    } else {
+        $guard->forgetUser();
+    }
+
     $failingDisk = Mockery::mock($disk);
     $write = $failingDisk->shouldReceive($stage === 'xlsx' ? 'putFileAs' : 'put');
     $temporaryFile = null;
@@ -76,7 +85,8 @@ it('rejects a failed export file write and can execute the original serialized p
             ->and($export->successful_rows)->toBe(1)
             ->and($disk->exists($path))->toBeFalse();
         if ($stage === 'chunk') {
-            expect(auth()->guard()->hasUser())->toBeFalse();
+            expect(auth()->guard())->toBe($guard)
+                ->and($guard->user())->toBe($previousUser);
         }
         if ($temporaryFile !== null) {
             expect(file_exists($temporaryFile))->toBeFalse();
@@ -89,6 +99,8 @@ it('rejects a failed export file write and can execute the original serialized p
             ->and($export->successful_rows)->toBe($stage === 'chunk' ? 5 : 1)
             ->and($disk->exists($path))->toBeTrue()
             ->and($disk->getVisibility($path))->toBe('private');
+        expect(auth()->guard())->toBe($guard)
+            ->and($guard->user())->toBe($previousUser);
         if ($stage === 'xlsx') {
             $reader = new XlsxReader;
             $reader->open($disk->path($path));
@@ -113,7 +125,12 @@ it('rejects a failed export file write and can execute the original serialized p
             unlink($temporaryFile);
         }
     }
-})->with(['header', 'chunk', 'xlsx'])->with(['returns false' => false, 'throws' => true]);
+})->with([
+    'header' => ['header', true],
+    'chunk with previous user' => ['chunk', true],
+    'chunk as guest' => ['chunk', false],
+    'xlsx' => ['xlsx', true],
+])->with(['returns false' => false, 'throws' => true]);
 
 it('preserves CSV cells and records in exports', function (string $format, bool $preventFormulaInjection): void {
     app()->bind(Authenticatable::class, User::class);
