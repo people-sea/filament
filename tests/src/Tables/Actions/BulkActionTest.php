@@ -1,6 +1,7 @@
 <?php
 
 use Filament\Tables\Actions\Action;
+use Filament\Tables\Actions\BulkAction;
 use Filament\Tables\Actions\DeleteBulkAction;
 use Filament\Tables\Table;
 use Filament\Tests\Models\Post;
@@ -73,6 +74,26 @@ it('can call a bulk action with arguments', function () {
             'payload' => $payload,
         ]);
 });
+
+it('authorizes final call arguments before bulk action callbacks', function (bool $permitted): void {
+    BulkAction::configureUsing(
+        static fn (BulkAction $action) => $action->authorize(static fn (array $arguments): bool => $arguments['permitted'] ?? true),
+        during: function () use ($permitted): void {
+            $component = livewire(PostsTable::class)
+                ->mountTableBulkAction('arguments', [])
+                ->call('callMountedTableBulkAction', ['permitted' => $permitted, 'payload' => 'submitted']);
+
+            if ($permitted) {
+                $component->assertDispatched('arguments-called', arguments: ['permitted' => true, 'payload' => 'submitted']);
+            } else {
+                $component->assertNotDispatched('arguments-called')
+                    ->assertTableBulkActionMounted('arguments')
+                    ->call('callMountedTableBulkAction', ['payload' => 'retry'])
+                    ->assertDispatched('arguments-called', arguments: ['payload' => 'retry']);
+            }
+        },
+    );
+})->with([false, true]);
 
 it('can call a bulk action and halt', function () {
     $posts = Post::factory()->count(10)->create();

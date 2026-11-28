@@ -13,6 +13,7 @@ use Filament\Tests\Tables\Fixtures\HiddenPivotTeamsTable;
 use Filament\Tests\Tables\Fixtures\PostsTable;
 use Filament\Tests\Tables\TestCase;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Spatie\Translatable\HasTranslations;
 
 use function Filament\Tests\livewire;
@@ -291,6 +292,99 @@ it('can set default action data when mounted', function () {
         });
 });
 
+it('only updates a target authorized by the final table action arguments', function (bool $permitted): void {
+    $allowedPost = Post::factory()->create(['title' => 'Allowed original']);
+    $deniedPost = Post::factory()->create(['title' => 'Denied original']);
+
+    livewire(ArgumentAuthorizedTable::class, ['allowedPostId' => $allowedPost->getKey()])
+        ->call('mountTableAction', 'updateTarget', (string) $allowedPost->getKey(), ['target' => $allowedPost->getKey()])
+        ->assertTableActionMounted('updateTarget')
+        ->call('callMountedTableAction', ['target' => $permitted ? $allowedPost->getKey() : $deniedPost->getKey()]);
+
+    expect($deniedPost->refresh()->title)->toBe('Denied original')
+        ->and($allowedPost->refresh()->title)->toBe($permitted ? 'Updated' : 'Allowed original');
+})->with([false, true]);
+
+it('checks table action availability against final call arguments before submission callbacks', function (string $restriction, bool $permitted): void {
+    $callbacks = [];
+
+    Action::configureUsing(function (Action $action) use ($restriction, &$callbacks): void {
+        $condition = static fn (array $arguments): bool => $arguments['permitted'] ?? true;
+
+        match ($restriction) {
+            'authorize' => $action->authorize($condition),
+            'visible' => $action->visible($condition),
+            'hidden' => $action->hidden(static fn (array $arguments): bool => ! $condition($arguments)),
+            'disabled' => $action->disabled(static fn (array $arguments): bool => ! $condition($arguments)),
+        };
+
+        $action
+            ->form([TextInput::make('value')->default('ready')->required()])
+            ->beforeFormValidated(function () use (&$callbacks): void {
+                $callbacks[] = 'before validation';
+            })
+            ->afterFormValidated(function () use (&$callbacks): void {
+                $callbacks[] = 'after validation';
+            })
+            ->before(function () use (&$callbacks): void {
+                $callbacks[] = 'before';
+            })
+            ->after(function () use (&$callbacks): void {
+                $callbacks[] = 'after';
+            });
+    }, during: function () use ($permitted, &$callbacks): void {
+        $component = livewire(PostsTable::class)
+            ->call('mountTableAction', 'arguments', null, ['context' => 'mounted', 'permitted' => true])
+            ->call('callMountedTableAction', ['permitted' => $permitted, 'payload' => 'submitted']);
+
+        if ($permitted) {
+            $component->assertDispatched('arguments-called', arguments: ['context' => 'mounted', 'permitted' => true, 'payload' => 'submitted']);
+            expect($callbacks)->toBe(['before validation', 'after validation', 'before', 'after']);
+        } else {
+            $component->assertNotDispatched('arguments-called');
+            expect($callbacks)->toBe([]);
+
+            $component->assertTableActionMounted('arguments')
+                ->call('callMountedTableAction', ['payload' => 'retry'])
+                ->assertDispatched('arguments-called', arguments: ['context' => 'mounted', 'permitted' => true, 'payload' => 'retry']);
+        }
+    });
+})->with(['authorize', 'visible', 'hidden', 'disabled'])->with([false, true]);
+
+it('restores table action arguments when a call does not complete', function (string $outcome): void {
+    Action::configureUsing(
+        static fn (Action $action) => $action
+            ->authorize(static function (array $arguments): bool {
+                if (($arguments['outcome'] ?? null) === 'authorization exception') {
+                    throw new RuntimeException('Authorization failed');
+                }
+
+                return ($arguments['outcome'] ?? null) !== 'denied';
+            })
+            ->before(static function (Action $action, array $arguments): void {
+                match ($arguments['outcome'] ?? null) {
+                    'halt' => $action->halt(),
+                    'cancel' => $action->cancel(),
+                    'validation' => throw ValidationException::withMessages(['value' => 'Invalid']),
+                    default => throw new RuntimeException('Callback failed'),
+                };
+            }),
+        during: function () use ($outcome): void {
+            $component = livewire(PostsTable::class)
+                ->call('mountTableAction', 'arguments', null, ['context' => 'mounted']);
+            $action = $component->instance()->getMountedTableAction();
+
+            try {
+                $component->instance()->callMountedTableAction(['outcome' => $outcome]);
+            } catch (RuntimeException | ValidationException $exception) {
+                expect($outcome)->toBeIn(['authorization exception', 'exception', 'validation']);
+            }
+
+            expect($action->getArguments())->toBe(['context' => 'mounted']);
+        },
+    );
+})->with(['denied', 'authorization exception', 'halt', 'cancel', 'validation', 'exception']);
+
 it('can call an action with arguments', function () {
     livewire(PostsTable::class)
         ->callTableAction('arguments', arguments: [
@@ -407,6 +501,21 @@ it('preserves parent edits when mounting an unavailable table child', function (
         ->assertSet('mountedTableActions', ['restricted'])
         ->assertTableActionDataSet(['value' => 'edited value']);
 })->with(['missing', 'unavailable']);
+
+class ArgumentAuthorizedTable extends PostsTable
+{
+    public int $allowedPostId;
+
+    public function table(Table $table): Table
+    {
+        return parent::table($table)->actions([
+            Action::make('updateTarget')
+                ->requiresConfirmation()
+                ->authorize(fn (array $arguments): bool => ($arguments['target'] ?? $this->allowedPostId) === $this->allowedPostId)
+                ->action(static fn (array $arguments) => Post::findOrFail($arguments['target'])->update(['title' => 'Updated'])),
+        ]);
+    }
+}
 
 class RestoredTableActions extends PostsTable
 {

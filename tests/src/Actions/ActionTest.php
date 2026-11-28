@@ -104,6 +104,26 @@ it('can mount an action with arguments', function () {
         ]);
 });
 
+it('authorizes final call arguments before page action callbacks', function (bool $permitted): void {
+    Action::configureUsing(
+        static fn (Action $action) => $action->authorize(static fn (array $arguments): bool => $arguments['permitted'] ?? true),
+        during: function () use ($permitted): void {
+            $component = livewire(Actions::class)
+                ->mountAction('arguments', arguments: ['context' => 'mounted', 'permitted' => true])
+                ->call('callMountedAction', ['permitted' => $permitted, 'payload' => 'submitted']);
+
+            if ($permitted) {
+                $component->assertDispatched('arguments-called', arguments: ['context' => 'mounted', 'permitted' => true, 'payload' => 'submitted']);
+            } else {
+                $component->assertNotDispatched('arguments-called')
+                    ->assertActionMounted('arguments')
+                    ->call('callMountedAction', ['payload' => 'retry'])
+                    ->assertDispatched('arguments-called', arguments: ['context' => 'mounted', 'permitted' => true, 'payload' => 'retry']);
+            }
+        },
+    );
+})->with([false, true]);
+
 it('can mount a nested action with parent arguments', function () {
     livewire(Actions::class)
         ->mountAction('arguments.nested', arguments: [

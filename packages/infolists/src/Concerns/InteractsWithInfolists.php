@@ -94,77 +94,86 @@ trait InteractsWithInfolists
             return null;
         }
 
-        if ($action->isDisabled()) {
-            return null;
-        }
-
-        $action->mergeArguments($arguments);
-
-        $form = $this->getMountedInfolistActionForm(mountedAction: $action);
-
-        $result = null;
+        $originalArguments = $action->hasArguments() ? $action->getArguments() : null;
 
         try {
-            $action->beginDatabaseTransaction();
+            $action->mergeArguments($arguments);
 
-            if ($this->mountedInfolistActionHasForm(mountedAction: $action)) {
-                $action->callBeforeFormValidated();
+            if ($action->isDisabled()) {
+                return null;
+            }
 
-                $form->getState(afterValidate: function (array $state) use ($action) {
-                    $action->callAfterFormValidated();
+            $form = $this->getMountedInfolistActionForm(mountedAction: $action);
 
-                    $action->formData($state);
+            $result = null;
 
+            try {
+                $action->beginDatabaseTransaction();
+
+                if ($this->mountedInfolistActionHasForm(mountedAction: $action)) {
+                    $action->callBeforeFormValidated();
+
+                    $form->getState(afterValidate: function (array $state) use ($action) {
+                        $action->callAfterFormValidated();
+
+                        $action->formData($state);
+
+                        $action->callBefore();
+                    });
+                } else {
                     $action->callBefore();
-                });
-            } else {
-                $action->callBefore();
+                }
+
+                $result = $action->call([
+                    'form' => $form,
+                ]);
+
+                $result = $action->callAfter() ?? $result;
+            } catch (Halt $exception) {
+                $exception->shouldRollbackDatabaseTransaction() ?
+                    $action->rollBackDatabaseTransaction() :
+                    $action->commitDatabaseTransaction();
+
+                return null;
+            } catch (Cancel $exception) {
+                $exception->shouldRollbackDatabaseTransaction() ?
+                    $action->rollBackDatabaseTransaction() :
+                    $action->commitDatabaseTransaction();
+            } catch (ValidationException $exception) {
+                $action->rollBackDatabaseTransaction();
+
+                if (! $this->mountedInfolistActionShouldOpenModal(mountedAction: $action)) {
+                    $action->resetArguments();
+                    $action->resetFormData();
+
+                    $this->unmountInfolistAction();
+                }
+
+                throw $exception;
+            } catch (Throwable $exception) {
+                $action->rollBackDatabaseTransaction();
+
+                throw $exception;
             }
 
-            $result = $action->call([
-                'form' => $form,
-            ]);
+            $action->commitDatabaseTransaction();
 
-            $result = $action->callAfter() ?? $result;
-        } catch (Halt $exception) {
-            $exception->shouldRollbackDatabaseTransaction() ?
-                $action->rollBackDatabaseTransaction() :
-                $action->commitDatabaseTransaction();
-
-            return null;
-        } catch (Cancel $exception) {
-            $exception->shouldRollbackDatabaseTransaction() ?
-                $action->rollBackDatabaseTransaction() :
-                $action->commitDatabaseTransaction();
-        } catch (ValidationException $exception) {
-            $action->rollBackDatabaseTransaction();
-
-            if (! $this->mountedInfolistActionShouldOpenModal(mountedAction: $action)) {
-                $action->resetArguments();
-                $action->resetFormData();
-
-                $this->unmountInfolistAction();
+            if (store($this)->has('redirect')) {
+                return $result;
             }
 
-            throw $exception;
-        } catch (Throwable $exception) {
-            $action->rollBackDatabaseTransaction();
+            $action->resetArguments();
+            $action->resetFormData();
 
-            throw $exception;
-        }
+            $this->unmountInfolistAction();
 
-        $action->commitDatabaseTransaction();
-
-        if (store($this)->has('redirect')) {
             return $result;
+        } finally {
+            // Keep temporary call arguments out of subsequent availability checks.
+            if ($action->hasArguments()) {
+                $action->arguments($originalArguments);
+            }
         }
-
-        $action->resetArguments();
-        $action->resetFormData();
-
-        $this->unmountInfolistAction();
-
-        return $result;
     }
 
     public function mountInfolistAction(string $name, ?string $component = null, ?string $infolist = null): mixed

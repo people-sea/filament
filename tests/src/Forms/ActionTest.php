@@ -72,6 +72,26 @@ it('can call an action with arguments', function () {
         ->assertFormSet(['textInput' => $value]);
 });
 
+it('authorizes final call arguments before form component action callbacks', function (bool $permitted): void {
+    Action::configureUsing(
+        static fn (Action $action) => $action
+            ->requiresConfirmation()
+            ->authorize(static fn (array $arguments): bool => $arguments['permitted'] ?? true),
+        during: function () use ($permitted): void {
+            $component = livewire(Actions::class)
+                ->mountFormComponentAction('textInput', 'setValueFromArguments')
+                ->call('callMountedFormComponentAction', ['permitted' => $permitted, 'value' => 'submitted'])
+                ->assertFormSet(['textInput' => $permitted ? 'submitted' : null]);
+
+            if (! $permitted) {
+                $component->assertFormComponentActionMounted('textInput', 'setValueFromArguments')
+                    ->call('callMountedFormComponentAction', ['value' => 'retry'])
+                    ->assertFormSet(['textInput' => 'retry']);
+            }
+        },
+    );
+})->with([false, true]);
+
 it('can call an action and halt', function () {
     livewire(Actions::class)
         ->callFormComponentAction('textInput', 'halt')

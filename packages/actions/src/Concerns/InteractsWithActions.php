@@ -68,89 +68,98 @@ trait InteractsWithActions
             return null;
         }
 
-        if ($action->isDisabled()) {
-            return null;
-        }
-
-        $action->mergeArguments($arguments);
-
-        $form = $this->getMountedActionForm(mountedAction: $action);
-
-        $result = null;
-
-        $originallyMountedActions = $this->mountedActions;
+        $originalArguments = $action->hasArguments() ? $action->getArguments() : null;
 
         try {
-            $action->beginDatabaseTransaction();
+            $action->mergeArguments($arguments);
 
-            if ($this->mountedActionHasForm(mountedAction: $action)) {
-                $action->callBeforeFormValidated();
+            if ($action->isDisabled()) {
+                return null;
+            }
 
-                $form->getState(afterValidate: function (array $state) use ($action) {
-                    $action->callAfterFormValidated();
+            $form = $this->getMountedActionForm(mountedAction: $action);
 
-                    $action->formData($state);
+            $result = null;
 
+            $originallyMountedActions = $this->mountedActions;
+
+            try {
+                $action->beginDatabaseTransaction();
+
+                if ($this->mountedActionHasForm(mountedAction: $action)) {
+                    $action->callBeforeFormValidated();
+
+                    $form->getState(afterValidate: function (array $state) use ($action) {
+                        $action->callAfterFormValidated();
+
+                        $action->formData($state);
+
+                        $action->callBefore();
+                    });
+                } else {
                     $action->callBefore();
-                });
-            } else {
-                $action->callBefore();
+                }
+
+                $result = $action->call([
+                    'form' => $form,
+                ]);
+
+                $result = $action->callAfter() ?? $result;
+
+                $this->afterActionCalled();
+            } catch (Halt $exception) {
+                $exception->shouldRollbackDatabaseTransaction() ?
+                    $action->rollBackDatabaseTransaction() :
+                    $action->commitDatabaseTransaction();
+
+                return null;
+            } catch (Cancel $exception) {
+                $exception->shouldRollbackDatabaseTransaction() ?
+                    $action->rollBackDatabaseTransaction() :
+                    $action->commitDatabaseTransaction();
+            } catch (ValidationException $exception) {
+                $action->rollBackDatabaseTransaction();
+
+                if (! $this->mountedActionShouldOpenModal(mountedAction: $action)) {
+                    $action->resetArguments();
+                    $action->resetFormData();
+
+                    $this->unmountAction();
+                }
+
+                throw $exception;
+            } catch (Throwable $exception) {
+                $action->rollBackDatabaseTransaction();
+
+                throw $exception;
             }
 
-            $result = $action->call([
-                'form' => $form,
-            ]);
+            $action->commitDatabaseTransaction();
 
-            $result = $action->callAfter() ?? $result;
-
-            $this->afterActionCalled();
-        } catch (Halt $exception) {
-            $exception->shouldRollbackDatabaseTransaction() ?
-                $action->rollBackDatabaseTransaction() :
-                $action->commitDatabaseTransaction();
-
-            return null;
-        } catch (Cancel $exception) {
-            $exception->shouldRollbackDatabaseTransaction() ?
-                $action->rollBackDatabaseTransaction() :
-                $action->commitDatabaseTransaction();
-        } catch (ValidationException $exception) {
-            $action->rollBackDatabaseTransaction();
-
-            if (! $this->mountedActionShouldOpenModal(mountedAction: $action)) {
-                $action->resetArguments();
-                $action->resetFormData();
-
-                $this->unmountAction();
+            if (store($this)->has('redirect')) {
+                return $result;
             }
 
-            throw $exception;
-        } catch (Throwable $exception) {
-            $action->rollBackDatabaseTransaction();
+            $action->resetArguments();
+            $action->resetFormData();
 
-            throw $exception;
-        }
+            // If the action was replaced while it was being called,
+            // we don't want to unmount it.
+            if ($originallyMountedActions !== $this->mountedActions) {
+                $action->clearRecordAfter();
 
-        $action->commitDatabaseTransaction();
+                return null;
+            }
 
-        if (store($this)->has('redirect')) {
+            $this->unmountAction();
+
             return $result;
+        } finally {
+            // Keep temporary call arguments out of subsequent availability checks.
+            if ($action->hasArguments()) {
+                $action->arguments($originalArguments);
+            }
         }
-
-        $action->resetArguments();
-        $action->resetFormData();
-
-        // If the action was replaced while it was being called,
-        // we don't want to unmount it.
-        if ($originallyMountedActions !== $this->mountedActions) {
-            $action->clearRecordAfter();
-
-            return null;
-        }
-
-        $this->unmountAction();
-
-        return $result;
     }
 
     protected function afterActionCalled(): void {}

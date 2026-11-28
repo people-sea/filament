@@ -47,6 +47,26 @@ it('can call an action with arguments', function () {
         ->assertDispatched('foo', $value);
 });
 
+it('authorizes final call arguments before infolist action callbacks', function (bool $permitted): void {
+    Action::configureUsing(
+        static fn (Action $action) => $action->authorize(static fn (array $arguments): bool => $arguments['permitted'] ?? true),
+        during: function () use ($permitted): void {
+            $component = livewire(Actions::class)
+                ->mountInfolistAction('textEntry', 'setValueFromArguments')
+                ->call('callMountedInfolistAction', ['permitted' => $permitted, 'value' => 'submitted']);
+
+            if ($permitted) {
+                $component->assertDispatched('foo', 'submitted');
+            } else {
+                $component->assertNotDispatched('foo')
+                    ->assertInfolistActionMounted('textEntry', 'setValueFromArguments')
+                    ->call('callMountedInfolistAction', ['value' => 'retry'])
+                    ->assertDispatched('foo', 'retry');
+            }
+        },
+    );
+})->with([false, true]);
+
 it('can call an action and halt', function () {
     livewire(Actions::class)
         ->callInfolistAction('textEntry', 'halt')
