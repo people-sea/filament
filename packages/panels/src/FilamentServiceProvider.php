@@ -2,6 +2,10 @@
 
 namespace Filament;
 
+use Filament\Actions\Exports\Jobs\CreateXlsxFile;
+use Filament\Actions\Exports\Jobs\ExportCompletion;
+use Filament\Actions\Exports\Jobs\ExportCsv;
+use Filament\Actions\Exports\Jobs\PrepareCsvExport;
 use Filament\Actions\Imports\Jobs\ImportCsv;
 use Filament\Auth\Http\Responses\BlockEmailChangeVerificationResponse;
 use Filament\Auth\Http\Responses\Contracts\BlockEmailChangeVerificationResponse as BlockEmailChangeVerificationResponseContract;
@@ -29,7 +33,8 @@ use Filament\Http\Middleware\SetUpPanel;
 use Filament\Livewire\ScopedModelPropertiesComponentHook;
 use Filament\Livewire\ValidatePanelOrigin;
 use Filament\Navigation\NavigationManager;
-use Filament\Queue\Middleware\RestoreImportTenant;
+use Filament\Queue\Middleware\RestoreExportPanel;
+use Filament\Queue\Middleware\RestoreImportPanel;
 use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Support\Assets\Font;
 use Filament\Support\Assets\Js;
@@ -102,22 +107,30 @@ class FilamentServiceProvider extends PackageServiceProvider
             app('livewire')->componentHook(app(ScopedModelPropertiesComponentHook::class));
         });
 
-        $this->app->resolving(ImportCsv::class, static function (ImportCsv $job): void {
-            $panel = Filament::getCurrentPanel();
-            $tenant = Filament::getTenant();
+        foreach ([
+            ImportCsv::class => RestoreImportPanel::class,
+            PrepareCsvExport::class => RestoreExportPanel::class,
+            ExportCsv::class => RestoreExportPanel::class,
+            CreateXlsxFile::class => RestoreExportPanel::class,
+            ExportCompletion::class => RestoreExportPanel::class,
+        ] as $jobClass => $middlewareClass) {
+            $this->app->resolving($jobClass, static function (ImportCsv | PrepareCsvExport | ExportCsv | CreateXlsxFile | ExportCompletion $job) use ($middlewareClass): void {
+                $panel = Filament::getCurrentPanel();
 
-            if ((! $panel?->hasTenancy()) || (! $tenant)) {
-                return;
-            }
+                // Preparation must preserve an absent panel so its chunks cannot inherit the worker's panel.
+                if ((! $panel) && (! $job instanceof PrepareCsvExport)) {
+                    return;
+                }
 
-            $job->through([
-                ...$job->middleware,
-                app(RestoreImportTenant::class, [
-                    'panelId' => $panel->getId(),
-                    'tenantId' => $tenant->getKey(),
-                ]),
-            ]);
-        });
+                $job->through([
+                    ...$job->middleware,
+                    app($middlewareClass, [
+                        'panelId' => $panel?->getId(),
+                        'tenantId' => $panel?->hasTenancy() ? Filament::getTenant()?->getKey() : null,
+                    ]),
+                ]);
+            });
+        }
     }
 
     public function packageBooted(): void

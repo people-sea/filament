@@ -14,14 +14,12 @@ trait HasArguments
      */
     public function arguments(?array $arguments): static
     {
-        if ($arguments === null) {
-            $this->arguments = null;
-
-            return $this;
+        if ($this->arguments !== $arguments) {
+            $this->clearVisibilityCache();
+            $this->getRootGroup()?->clearVisibilityCache();
         }
 
-        $this->arguments = [];
-        $this->mergeArguments($arguments);
+        $this->arguments = $arguments;
 
         return $this;
     }
@@ -31,12 +29,10 @@ trait HasArguments
      */
     public function mergeArguments(array $arguments): static
     {
-        $this->arguments = [
+        return $this->arguments([
             ...$this->arguments ?? [],
             ...$arguments,
-        ];
-
-        return $this;
+        ]);
     }
 
     /**

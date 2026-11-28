@@ -54,6 +54,11 @@ class PrepareCsvExport implements ShouldQueue
         );
     }
 
+    public function getExport(): Export
+    {
+        return $this->export;
+    }
+
     public function handle(): void
     {
         if ($this->batch()?->cancelled()) {

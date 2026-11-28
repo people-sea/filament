@@ -1099,6 +1099,14 @@ public function view(User $user, Import $import): bool
 
 ## Security
 
+### Rechecking panel access
+
+For queued imports started while a Filament panel is current, Filament restores the originating panel and importing user and rechecks `canAccessPanel()` before processing each chunk. If the user no longer has access, the chunk fails without processing its rows. As with panel authentication, users who do not implement `FilamentUser` are only allowed in the `local` environment.
+
+Tenant-aware panel imports with a current tenant additionally recheck `canAccessTenant()`, as described in [importing tenant-aware records](#importing-tenant-aware-records). Imports started outside a Filament panel do not receive either of these panel checks.
+
+If your application needs additional authorization revocation checks, add [custom importer job middleware](#customizing-the-import-job-middleware).
+
 ### Per-record authorization
 
 The import system does not perform per-record authorization checks when creating or updating records. Each row from the CSV is processed by the importer's `resolveRecord()`, `fillRecord()`, and `saveRecord()` methods without consulting your application's [Laravel policies](https://laravel.com/docs/authorization#creating-policies). This means that if a user is allowed to trigger an import, they can create or update any record that the importer supports, regardless of whether they would normally be authorized to do so through your application's UI.
@@ -1110,7 +1118,7 @@ If you need per-record authorization during import, you should add checks in you
 
 ### Importing tenant-aware records
 
-When you start an import using `ImportAction` in a tenant-aware panel with a current tenant, Filament restores that panel and tenant for each import chunk. This applies the resources' tenant global scopes and new-record association. Each chunk checks that the tenant still exists and the importing user can still access it.
+When you start an import using `ImportAction` in a tenant-aware panel with a current tenant, Filament restores that panel and tenant for each import chunk. This applies the resources' tenant global scopes and new-record association. In addition to rechecking `canAccessPanel()`, each chunk checks that the tenant still exists and the importing user can still access it using `canAccessTenant()`. If either access check is denied, the chunk fails without processing its rows.
 
 This does not apply custom `Resource::getEloquentQuery()` restrictions or replace [per-record authorization](#per-record-authorization). Models without a tenant-scoped resource in the panel, queries that remove tenant scopes, and imports started outside this context need your own tenant constraints and associations.
 

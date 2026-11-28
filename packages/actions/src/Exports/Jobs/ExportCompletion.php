@@ -50,6 +50,11 @@ class ExportCompletion implements ShouldQueue
         );
     }
 
+    public function getExport(): Export
+    {
+        return $this->export;
+    }
+
     public function handle(): void
     {
         $this->export->touch('completed_at');

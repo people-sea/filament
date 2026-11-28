@@ -12,15 +12,17 @@ use Filament\Tests\Fixtures\Exports\WorkerPostExporter;
 use Filament\Tests\Fixtures\Models\Post;
 use Filament\Tests\Fixtures\Models\User;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Database\Eloquent\Casts\AsStringable;
 use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Storage;
 use League\Csv\Reader as CsvReader;
 use League\Flysystem\UnableToWriteFile;
+use OpenSpout\Common\Entity\Cell\FormulaCell;
 use OpenSpout\Reader\XLSX\Reader as XlsxReader;
 
 uses(TestCase::class);
 
-it('rejects a failed export file write and can execute the original serialized payload after recovery', function (string $stage, bool $throws): void {
+it('rejects a failed export file write and can execute the original serialized payload after recovery', function (string $stage, bool $hasPreviousUser, bool $throws): void {
     app()->bind(Authenticatable::class, User::class);
     Exceptions::fake();
     $disk = Storage::fake('local');
@@ -53,6 +55,15 @@ it('rejects a failed export file write and can execute the original serialized p
         'xlsx' => new CreateXlsxFile($export, $columnMap),
     };
     $payload = serialize($job);
+    $guard = auth()->guard();
+    $previousUser = $hasPreviousUser ? User::factory()->create() : null;
+
+    if ($previousUser) {
+        $guard->setUser($previousUser);
+    } else {
+        $guard->forgetUser();
+    }
+
     $failingDisk = Mockery::mock($disk);
     $write = $failingDisk->shouldReceive($stage === 'xlsx' ? 'putFileAs' : 'put');
     $temporaryFile = null;
@@ -74,7 +85,8 @@ it('rejects a failed export file write and can execute the original serialized p
             ->and($export->successful_rows)->toBe(1)
             ->and($disk->exists($path))->toBeFalse();
         if ($stage === 'chunk') {
-            expect(auth()->guard()->hasUser())->toBeFalse();
+            expect(auth()->guard())->toBe($guard)
+                ->and($guard->user())->toBe($previousUser);
         }
         if ($temporaryFile !== null) {
             expect(file_exists($temporaryFile))->toBeFalse();
@@ -87,6 +99,8 @@ it('rejects a failed export file write and can execute the original serialized p
             ->and($export->successful_rows)->toBe($stage === 'chunk' ? 5 : 1)
             ->and($disk->exists($path))->toBeTrue()
             ->and($disk->getVisibility($path))->toBe('private');
+        expect(auth()->guard())->toBe($guard)
+            ->and($guard->user())->toBe($previousUser);
         if ($stage === 'xlsx') {
             $reader = new XlsxReader;
             $reader->open($disk->path($path));
@@ -111,7 +125,12 @@ it('rejects a failed export file write and can execute the original serialized p
             unlink($temporaryFile);
         }
     }
-})->with(['header', 'chunk', 'xlsx'])->with(['returns false' => false, 'throws' => true]);
+})->with([
+    'header' => ['header', true],
+    'chunk with previous user' => ['chunk', true],
+    'chunk as guest' => ['chunk', false],
+    'xlsx' => ['xlsx', true],
+])->with(['returns false' => false, 'throws' => true]);
 
 it('preserves CSV cells and records in exports', function (string $format, bool $preventFormulaInjection): void {
     app()->bind(Authenticatable::class, User::class);
@@ -172,4 +191,75 @@ it('preserves CSV cells and records in exports', function (string $format, bool 
     }
 
     expect($rows)->toBe($expected);
+})->with(['csv', 'xlsx'])->with([false, true]);
+
+it('applies `preventFormulaInjection()` to native strings and `AsStringable` attributes in export files', function (string $format, bool $preventFormulaInjection): void {
+    app()->bind(Authenticatable::class, User::class);
+    $disk = Storage::fake('local');
+    $posts = collect(['=2+3', 'Ordinary text', '+42', '-5'])
+        ->map(static fn (string $value): Post => Post::factory()->create([
+            'title' => $value,
+            'content' => $value,
+        ]));
+    $export = Export::create([
+        'user_id' => auth()->id(),
+        'exporter' => WorkerPostExporter::class,
+        'file_disk' => 'local',
+        'file_name' => 'posts',
+        'total_rows' => $posts->count(),
+    ]);
+    $query = EloquentSerializeFacade::serialize(Post::query()->withCasts(['content' => AsStringable::class])->orderBy('id'));
+    $columnMap = ['title' => 'Native string', 'content' => 'Stringable'];
+
+    (new PrepareCsvExport($export, $query, $columnMap, records: []))->withFakeBatch()[0]->handle();
+    ExportColumn::configureUsing(
+        static fn (ExportColumn $column) => $column->preventFormulaInjection($preventFormulaInjection),
+        during: fn () => (new ExportCsv($export, $query, $posts->pluck('id')->all(), 1, $columnMap))->handle(),
+    );
+
+    $formula = $preventFormulaInjection ? "'=2+3" : '=2+3';
+    $expected = [
+        ['Native string', 'Stringable'],
+        [$formula, $formula],
+        ['Ordinary text', 'Ordinary text'],
+        ['+42', '+42'],
+        ['-5', '-5'],
+    ];
+
+    if ($format === 'csv') {
+        $response = app(CsvDownloader::class)($export);
+        ob_start();
+        $response->sendContent();
+        $content = ob_get_clean();
+
+        expect(array_values(iterator_to_array(CsvReader::fromString($content)->getRecords())))->toBe($expected);
+
+        return;
+    }
+
+    (new CreateXlsxFile($export, $columnMap))->handle();
+
+    $reader = new XlsxReader;
+    $reader->open($disk->path($export->getFileDirectory() . '/posts.xlsx'));
+    $rows = [];
+    $formulaCellCount = 0;
+
+    try {
+        foreach ($reader->getSheetIterator() as $sheet) {
+            foreach ($sheet->getRowIterator() as $row) {
+                foreach ($row->getCells() as $cell) {
+                    if ($cell instanceof FormulaCell) {
+                        $formulaCellCount++;
+                    }
+                }
+
+                $rows[] = $row->toArray();
+            }
+        }
+    } finally {
+        $reader->close();
+    }
+
+    expect($formulaCellCount)->toBe($preventFormulaInjection ? 0 : 2)
+        ->and($rows)->toBe($expected);
 })->with(['csv', 'xlsx'])->with([false, true]);

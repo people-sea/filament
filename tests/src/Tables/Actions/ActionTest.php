@@ -1,10 +1,12 @@
 <?php
 
 use Filament\Actions\Action;
+use Filament\Actions\ActionGroup;
 use Filament\Actions\AttachAction;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\DetachAction;
 use Filament\Actions\Testing\TestAction;
+use Filament\Forms\Components\TextInput;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
 use Filament\Tests\Fixtures\Livewire\PostsTable;
@@ -15,8 +17,10 @@ use Filament\Tests\Fixtures\Models\Department;
 use Filament\Tests\Fixtures\Models\Post;
 use Filament\Tests\Fixtures\Models\Ticket;
 use Filament\Tests\Tables\TestCase;
+use Illuminate\Auth\Access\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 use function Filament\Tests\livewire;
 use function Pest\Laravel\assertDatabaseHas;
@@ -325,6 +329,223 @@ describe('nested actions', function (): void {
 });
 
 describe('arguments and halting', function (): void {
+    it('authorizes the final merged modal arguments before running lifecycle callbacks', function (?string $feedback, bool $isAllowed): void {
+        $row = Post::factory()->create();
+        $originalTarget = Post::factory()->create(['is_published' => true, 'title' => 'Original']);
+        $target = Post::factory()->create(['is_published' => $isAllowed, 'title' => 'Unchanged']);
+        $authorizationArguments = [];
+        $callbacks = [];
+
+        Table::configureUsing(
+            function (Table $table) use ($feedback, &$authorizationArguments, &$callbacks): Table {
+                $action = Action::make('updateTarget')
+                    ->schema([TextInput::make('title')->default('Updated')->required()])
+                    ->authorize(function (array $arguments) use (&$authorizationArguments): Response {
+                        $authorizationArguments[] = $arguments;
+
+                        return (empty($arguments['target_id']) || Post::findOrFail($arguments['target_id'])->is_published)
+                            ? Response::allow()
+                            : Response::deny('Target is forbidden.');
+                    })
+                    ->beforeFormValidated(function () use (&$callbacks): void {
+                        $callbacks[] = 'beforeFormValidated';
+                    })
+                    ->afterFormValidated(function () use (&$callbacks): void {
+                        $callbacks[] = 'afterFormValidated';
+                    })
+                    ->before(function () use (&$callbacks): void {
+                        $callbacks[] = 'before';
+                    })
+                    ->action(function (array $arguments, array $data) use (&$callbacks): void {
+                        $callbacks[] = 'action';
+                        Post::findOrFail($arguments['target_id'])->update(['title' => $data['title']]);
+                    })
+                    ->after(function () use (&$callbacks): void {
+                        $callbacks[] = 'after';
+                    });
+
+                if ($feedback) {
+                    $action->{$feedback}();
+                }
+
+                return $table->recordActions([$action]);
+            },
+            during: function () use ($row, $originalTarget, $target, $isAllowed, &$authorizationArguments, &$callbacks): void {
+                $component = livewire(MountedActionArgumentsTable::class)
+                    ->mountAction(TestAction::make('updateTarget')->table($row)->arguments([
+                        'target_id' => $originalTarget->getKey(),
+                        'preserved' => 'mounted',
+                    ]))
+                    ->assertActionMounted(TestAction::make('updateTarget')->table($row));
+
+                $component->call('callMountedAction', ['target_id' => $target->getKey()])->assertHasNoErrors();
+
+                expect($target->refresh()->title)->toBe($isAllowed ? 'Updated' : 'Unchanged')
+                    ->and($originalTarget->refresh()->title)->toBe('Original')
+                    ->and($authorizationArguments)->toContain([
+                        'target_id' => $target->getKey(),
+                        'preserved' => 'mounted',
+                    ])
+                    ->and($callbacks)->toBe($isAllowed ? ['beforeFormValidated', 'afterFormValidated', 'before', 'action', 'after'] : []);
+
+                if (! $isAllowed) {
+                    expect($component->instance()->getMountedAction()->getArguments())->toBe([
+                        'target_id' => $originalTarget->getKey(),
+                        'preserved' => 'mounted',
+                    ]);
+
+                    $component->call('callMountedAction')->assertHasNoErrors();
+
+                    expect($originalTarget->refresh()->title)->toBe('Updated')
+                        ->and($target->refresh()->title)->toBe('Unchanged');
+                }
+            },
+        );
+    })->with([null, 'authorizationNotification', 'authorizationTooltip'])->with([false, true]);
+
+    it('reevaluates argument-dependent availability before submitting a modal', function (string $condition): void {
+        $row = Post::factory()->create();
+
+        Table::configureUsing(
+            static fn (Table $table): Table => $table->recordActions([
+                Action::make('available')
+                    ->requiresConfirmation()
+                    ->{$condition}(static fn (array $arguments): bool => ($condition === 'visible') ? ($arguments['allowed'] ?? true) : ! ($arguments['allowed'] ?? true))
+                    ->before(static fn (PostsTable $livewire) => $livewire->dispatch('before-called'))
+                    ->action(static fn (PostsTable $livewire) => $livewire->dispatch('action-called'))
+                    ->after(static fn (PostsTable $livewire) => $livewire->dispatch('after-called')),
+            ]),
+            during: static fn () => livewire(MountedActionArgumentsTable::class)
+                ->mountAction(TestAction::make('available')->table($row)->arguments(['allowed' => true]))
+                ->assertActionMounted(TestAction::make('available')->table($row))
+                ->call('callMountedAction', ['allowed' => false])
+                ->assertNotDispatched('before-called')
+                ->assertNotDispatched('action-called')
+                ->assertNotDispatched('after-called'),
+        );
+    })->with(['hidden', 'visible', 'disabled']);
+
+    it('reevaluates argument-dependent group visibility before submitting a modal', function (bool $isNested): void {
+        $row = Post::factory()->create();
+
+        Table::configureUsing(
+            static function (Table $table) use ($isNested): Table {
+                $action = Action::make('grouped')
+                    ->requiresConfirmation()
+                    ->before(static fn (PostsTable $livewire) => $livewire->dispatch('before-called'))
+                    ->action(static fn (PostsTable $livewire) => $livewire->dispatch('action-called'))
+                    ->after(static fn (PostsTable $livewire) => $livewire->dispatch('after-called'));
+                $group = ActionGroup::make([$action])
+                    ->hidden(static fn (): bool => ! ($action->getArguments()['allowed'] ?? true));
+
+                return $table->recordActions([$isNested ? ActionGroup::make([$group]) : $group]);
+            },
+            during: static fn () => livewire(MountedActionArgumentsTable::class)
+                ->mountAction(TestAction::make('grouped')->table($row)->arguments(['allowed' => true]))
+                ->assertActionMounted(TestAction::make('grouped')->table($row))
+                ->call('callMountedAction', ['allowed' => false])
+                ->assertNotDispatched('before-called')
+                ->assertNotDispatched('action-called')
+                ->assertNotDispatched('after-called'),
+        );
+    })->with([false, true]);
+
+    it('preserves explicit mounted argument updates without retaining temporary call arguments', function (string $outcome): void {
+        $row = Post::factory()->create();
+
+        Table::configureUsing(
+            static fn (Table $table): Table => $table->recordActions([
+                Action::make('persist')
+                    ->arguments(['configured' => 'keep'])
+                    ->bootUsing(static fn (Action $action) => $action->mergeArguments(['preserved' => 'normalized']))
+                    ->requiresConfirmation()
+                    ->before(static function (Action $action, PostsTable $livewire) use ($outcome): void {
+                        $livewire->mergeMountedActionArguments(['preserved' => 'mounted', 'confirmed' => true]);
+
+                        if ($outcome === 'validation') {
+                            throw ValidationException::withMessages(['title' => 'Invalid.']);
+                        }
+
+                        match ($outcome) {
+                            'halt' => $action->halt(),
+                            'cancel' => $action->cancel(),
+                            default => null,
+                        };
+                    }),
+            ]),
+            during: function () use ($row, $outcome): void {
+                $component = livewire(MountedActionArgumentsTable::class)
+                    ->mountAction(TestAction::make('persist')->table($row)->arguments(['preserved' => 'mounted']));
+                $instance = $component->instance();
+                $action = $instance->getMountedAction();
+
+                if ($outcome === 'validation') {
+                    expect(fn () => $instance->callMountedAction(['temporary' => true]))->toThrow(ValidationException::class);
+                } else {
+                    $instance->callMountedAction(['temporary' => true]);
+                }
+
+                if (in_array($outcome, ['success', 'cancel'])) {
+                    expect($instance->mountedActions)->toBe([])
+                        ->and($action->getArguments())->toBe(['configured' => 'keep', 'preserved' => 'normalized']);
+                } else {
+                    expect($instance->mountedActions[0]['arguments'])->toBe(['preserved' => 'mounted', 'confirmed' => true])
+                        ->and($action->getArguments())->toBe(['configured' => 'keep', 'preserved' => 'mounted', 'confirmed' => true]);
+                }
+            },
+        );
+    })->with(['halt', 'validation', 'success', 'cancel']);
+
+    it('restores modal arguments and availability after submission exits', function (string $outcome): void {
+        $row = Post::factory()->create();
+
+        Table::configureUsing(
+            static fn (Table $table): Table => $table->recordActions([
+                Action::make('restore')
+                    ->arguments(['configured' => 'keep'])
+                    ->bootUsing(static fn (Action $action) => $action->mergeArguments(['preserved' => 'normalized']))
+                    ->schema([TextInput::make('title')->required()])
+                    ->authorize(static function (array $arguments): bool {
+                        if (($arguments['outcome'] ?? null) === 'authorizationException') {
+                            throw new RuntimeException('Authorization failed.');
+                        }
+
+                        return ($arguments['outcome'] ?? null) !== 'denied';
+                    })
+                    ->disabled(static fn (array $arguments): bool => ($arguments['outcome'] ?? null) === 'disabled')
+                    ->action(static function (Action $action, array $arguments, PostsTable $livewire): void {
+                        match ($arguments['outcome']) {
+                            'halt' => $action->halt(),
+                            'cancel' => $action->cancel(),
+                            'exception' => throw new RuntimeException('Action failed.'),
+                            'redirect' => $livewire->redirect('/finished'),
+                            default => null,
+                        };
+                    }),
+            ]),
+            during: function () use ($row, $outcome): void {
+                $component = livewire(MountedActionArgumentsTable::class)
+                    ->mountAction(TestAction::make('restore')->table($row)->arguments(['preserved' => 'mounted']))
+                    ->fillForm(['title' => ($outcome === 'validation') ? null : 'Updated']);
+                $instance = $component->instance();
+                $action = $instance->getMountedAction();
+
+                expect($action->getArguments())->toBe(['configured' => 'keep', 'preserved' => 'normalized']);
+
+                if (in_array($outcome, ['exception', 'authorizationException', 'validation'])) {
+                    expect(fn () => $instance->callMountedAction(['outcome' => $outcome]))
+                        ->toThrow(($outcome === 'validation') ? ValidationException::class : RuntimeException::class);
+                } else {
+                    $instance->callMountedAction(['outcome' => $outcome]);
+                }
+
+                expect($action->getArguments())->toBe(['configured' => 'keep', 'preserved' => 'normalized'])
+                    ->and($action->isAuthorized())->toBeTrue()
+                    ->and($action->isDisabled())->toBeFalse();
+            },
+        );
+    })->with(['denied', 'disabled', 'halt', 'cancel', 'validation', 'exception', 'authorizationException', 'success', 'redirect']);
+
     it('can call an action with arguments', function (): void {
         livewire(PostsTable::class)
             ->callAction(TestAction::make('arguments')->table()->arguments([
@@ -647,3 +868,11 @@ describe('record actions column visibility', function (): void {
             ->assertSeeHtml('fi-ta-actions-header-cell');
     });
 });
+
+class MountedActionArgumentsTable extends PostsTable
+{
+    public function table(Table $table): Table
+    {
+        return $table->query(Post::query());
+    }
+}
