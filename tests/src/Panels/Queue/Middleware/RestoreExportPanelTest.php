@@ -297,8 +297,8 @@ it('restores panel and authentication context when exporting throws', function (
 
 it('preserves panel context through the actual queued export chain', function () use ($dispatchExport): void {
     config()->set([
-        'queue.connections.database' => ['driver' => 'database', 'connection' => 'testing', 'table' => 'jobs', 'queue' => 'exports', 'retry_after' => 90],
-        'queue.batching.database' => 'testing',
+        'queue.connections.database' => ['driver' => 'database', 'connection' => config('database.default'), 'table' => 'jobs', 'queue' => 'exports', 'retry_after' => 90],
+        'queue.batching.database' => config('database.default'),
     ]);
     $following = $dispatchExport->call($this, [ExportFormat::Csv, ExportFormat::Xlsx]);
     $prepare = unserialize(array_shift($following));
