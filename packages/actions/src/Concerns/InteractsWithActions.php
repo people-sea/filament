@@ -119,6 +119,14 @@ trait InteractsWithActions /** @phpstan-ignore trait.unused */
      */
     protected ?array $resolvingMountedActions = null;
 
+    /**
+     * Track explicit updates per active call, rather than replaying raw mount
+     * arguments that may predate `bootUsing()` normalization.
+     *
+     * @var array<array{action: Action, arguments: array<string, mixed>}>
+     */
+    protected array $mountedActionArgumentUpdates = [];
+
     protected bool $hasActionsModalRendered = false;
 
     /**
@@ -458,150 +466,160 @@ trait InteractsWithActions /** @phpstan-ignore trait.unused */
             $this->flushCachedTableRecords();
         }
 
-        $originalActionArguments = $action->getArguments();
+        $originalActionArguments = $action->hasArguments() ? $action->getArguments() : null;
 
-        $action->mergeArguments($arguments);
-
-        if ($action->isDisabled() || (filled($action->getUrl()) && (! $action->isLivewireClickHandlerEnabled()))) {
-            return null;
-        }
-
-        if (
-            $action->hasAuthorizationNotification() &&
-            (! $action->isAuthorized())
-        ) {
-            return null;
-        }
-
-        if ($rateLimit = $action->getRateLimit()) {
-            try {
-                $this->rateLimit($rateLimit, method: json_encode(array_map(fn (array $action): array => Arr::except($action, ['data']), $this->mountedActions)));
-            } catch (TooManyRequestsException $exception) {
-                $action->sendRateLimitedNotification($exception);
-
-                return null;
-            }
-        }
-
-        $schema = $this->getMountedActionSchema(mountedAction: $action);
-
-        $originallyMountedActions = $this->mountedActions;
-
-        $result = null;
-
-        $hasFinalizedDatabaseTransaction = false;
+        $this->mountedActionArgumentUpdates[] = ['action' => $action, 'arguments' => []];
 
         try {
-            $action->beginDatabaseTransaction();
+            $action->mergeArguments($arguments);
 
-            $schemaState = [];
+            if ($action->isDisabled() || (filled($action->getUrl()) && (! $action->isLivewireClickHandlerEnabled()))) {
+                return null;
+            }
 
-            if (($actionComponent = $action->getSchemaComponent()) instanceof ExposesStateToActionData) {
-                foreach ($actionComponent->getChildSchemas() as $actionComponentChildSchema) {
-                    $schemaState = [
-                        ...$schemaState,
-                        ...$actionComponentChildSchema->getState(),
-                    ];
+            if (! $action->isAuthorized()) {
+                return null;
+            }
+
+            if ($rateLimit = $action->getRateLimit()) {
+                try {
+                    $this->rateLimit($rateLimit, method: json_encode(array_map(fn (array $action): array => Arr::except($action, ['data']), $this->mountedActions)));
+                } catch (TooManyRequestsException $exception) {
+                    $action->sendRateLimitedNotification($exception);
+
+                    return null;
                 }
             }
 
-            if ($this->mountedActionHasSchema(mountedAction: $action)) {
-                $action->callBeforeFormValidated();
+            $schema = $this->getMountedActionSchema(mountedAction: $action);
 
-                $schema->getState(afterValidate: function (array $state) use ($action, $schemaState): void {
-                    $action->callAfterFormValidated();
+            $originallyMountedActions = $this->mountedActions;
 
-                    $action->data([
-                        ...$schemaState,
-                        ...$state,
-                    ]);
+            $result = null;
+
+            $hasFinalizedDatabaseTransaction = false;
+
+            try {
+                $action->beginDatabaseTransaction();
+
+                $schemaState = [];
+
+                if (($actionComponent = $action->getSchemaComponent()) instanceof ExposesStateToActionData) {
+                    foreach ($actionComponent->getChildSchemas() as $actionComponentChildSchema) {
+                        $schemaState = [
+                            ...$schemaState,
+                            ...$actionComponentChildSchema->getState(),
+                        ];
+                    }
+                }
+
+                if ($this->mountedActionHasSchema(mountedAction: $action)) {
+                    $action->callBeforeFormValidated();
+
+                    $schema->getState(afterValidate: function (array $state) use ($action, $schemaState): void {
+                        $action->callAfterFormValidated();
+
+                        $action->data([
+                            ...$schemaState,
+                            ...$state,
+                        ]);
+
+                        $action->callBefore();
+                    });
+                } else {
+                    $action->data($schemaState);
 
                     $action->callBefore();
-                });
-            } else {
-                $action->data($schemaState);
+                }
 
-                $action->callBefore();
+                $result = $action->call([
+                    'form' => $schema,
+                    'schema' => $schema,
+                ]);
+
+                $result = $action->callAfter() ?? $result;
+
+                $this->afterActionCalled($action);
+
+                (match ($action->getStatus()) {
+                    ActionStatus::Success => function () use ($action): void {
+                        $action->sendSuccessNotification();
+                        $action->dispatchSuccessRedirect();
+                    },
+                    ActionStatus::Failure => function () use ($action): void {
+                        $action->sendFailureNotification();
+                        $action->dispatchFailureRedirect();
+                    },
+                })();
+            } catch (Halt $exception) {
+                $exception->shouldRollbackDatabaseTransaction() ?
+                    $action->rollBackDatabaseTransaction() :
+                    $action->commitDatabaseTransaction();
+
+                return null;
+            } catch (Cancel $exception) {
+                $exception->shouldRollbackDatabaseTransaction() ?
+                    $action->rollBackDatabaseTransaction() :
+                    $action->commitDatabaseTransaction();
+
+                $hasFinalizedDatabaseTransaction = true;
+            } catch (ValidationException $exception) {
+                $action->rollBackDatabaseTransaction();
+
+                if (! $this->mountedActionShouldOpenModal(mountedAction: $action)) {
+                    $action->arguments($originalActionArguments);
+                    $action->resetData();
+
+                    $this->unmountAction(cancelParentActions: false);
+                }
+
+                throw $exception;
+            } catch (Throwable $exception) {
+                $action->rollBackDatabaseTransaction();
+
+                throw $exception;
             }
 
-            $result = $action->call([
-                'form' => $schema,
-                'schema' => $schema,
-            ]);
-
-            $result = $action->callAfter() ?? $result;
-
-            $this->afterActionCalled($action);
-
-            (match ($action->getStatus()) {
-                ActionStatus::Success => function () use ($action): void {
-                    $action->sendSuccessNotification();
-                    $action->dispatchSuccessRedirect();
-                },
-                ActionStatus::Failure => function () use ($action): void {
-                    $action->sendFailureNotification();
-                    $action->dispatchFailureRedirect();
-                },
-            })();
-        } catch (Halt $exception) {
-            $exception->shouldRollbackDatabaseTransaction() ?
-                $action->rollBackDatabaseTransaction() :
+            if (! $hasFinalizedDatabaseTransaction) {
                 $action->commitDatabaseTransaction();
-
-            return null;
-        } catch (Cancel $exception) {
-            $exception->shouldRollbackDatabaseTransaction() ?
-                $action->rollBackDatabaseTransaction() :
-                $action->commitDatabaseTransaction();
-
-            $hasFinalizedDatabaseTransaction = true;
-        } catch (ValidationException $exception) {
-            $action->rollBackDatabaseTransaction();
-
-            if (! $this->mountedActionShouldOpenModal(mountedAction: $action)) {
-                $action->arguments($originalActionArguments);
-                $action->resetData();
-
-                $this->unmountAction(cancelParentActions: false);
             }
 
-            throw $exception;
-        } catch (Throwable $exception) {
-            $action->rollBackDatabaseTransaction();
+            if (store($this)->has('redirect')) {
+                $this->unmountAction();
 
-            throw $exception;
-        }
+                return $result;
+            }
 
-        if (! $hasFinalizedDatabaseTransaction) {
-            $action->commitDatabaseTransaction();
-        }
+            $this->partiallyRenderActionParentSchema($action);
 
-        if (store($this)->has('redirect')) {
+            $action->arguments($originalActionArguments);
+            $action->resetData();
+
+            $onlyActionNamesAndContexts = fn (array $actions): array => collect($actions)
+                ->map(fn (array $action): array => Arr::only($action, ['name', 'context']))
+                ->all();
+
+            // If the action was replaced while it was being called,
+            // we don't want to unmount it.
+            if ($onlyActionNamesAndContexts($originallyMountedActions) !== $onlyActionNamesAndContexts($this->mountedActions)) {
+                $action->clearRecordAfter();
+
+                return null;
+            }
+
             $this->unmountAction();
 
             return $result;
+        } finally {
+            $argumentUpdates = array_pop($this->mountedActionArgumentUpdates)['arguments'];
+
+            // Preserve explicit `mergeMountedActionArguments()` updates, not temporary call-time arguments.
+            $action->arguments(
+                ($argumentUpdates && $this->isActionMounted($action))
+                    ? array_merge($originalActionArguments ?? [], $argumentUpdates)
+                    : $originalActionArguments,
+            );
         }
-
-        $this->partiallyRenderActionParentSchema($action);
-
-        $action->arguments($originalActionArguments);
-        $action->resetData();
-
-        $onlyActionNamesAndContexts = fn (array $actions): array => collect($actions)
-            ->map(fn (array $action): array => Arr::only($action, ['name', 'context']))
-            ->all();
-
-        // If the action was replaced while it was being called,
-        // we don't want to unmount it.
-        if ($onlyActionNamesAndContexts($originallyMountedActions) !== $onlyActionNamesAndContexts($this->mountedActions)) {
-            $action->clearRecordAfter();
-
-            return null;
-        }
-
-        $this->unmountAction();
-
-        return $result;
     }
 
     #[Exposed]
@@ -1195,7 +1213,15 @@ trait InteractsWithActions /** @phpstan-ignore trait.unused */
             $arguments,
         );
 
-        $this->getMountedAction()->mergeArguments($arguments);
+        $action = $this->getMountedAction();
+        $action->mergeArguments($arguments);
+
+        // Reentrant calls on the same action must all retain explicitly persisted updates.
+        foreach ($this->mountedActionArgumentUpdates as $index => $argumentUpdates) {
+            if ($argumentUpdates['action'] === $action) {
+                $this->mountedActionArgumentUpdates[$index]['arguments'] = array_merge($argumentUpdates['arguments'], $arguments);
+            }
+        }
     }
 
     #[Unexposed]
