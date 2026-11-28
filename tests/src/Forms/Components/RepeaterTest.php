@@ -2,6 +2,7 @@
 
 namespace Filament\Tests\Forms\Components;
 
+use Closure;
 use DOMDocument;
 use DOMXPath;
 use Exception;
