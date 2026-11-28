@@ -4,6 +4,7 @@ use Filament\Facades\Filament;
 use Filament\Support\Services\RelationshipOrderer;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Grouping\Group;
+use Filament\Tests\Fixtures\Models\Company;
 use Filament\Tests\Fixtures\Models\Post;
 use Filament\Tests\Fixtures\Models\PostMetadata;
 use Filament\Tests\Fixtures\Models\Profile;
@@ -14,7 +15,11 @@ use Filament\Tests\TestCase;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\HasOneThrough;
 use Illuminate\Database\Query\Builder;
+use Illuminate\Database\Query\JoinClause;
+use Illuminate\Support\Facades\DB;
+use Znck\Eloquent\Relations\BelongsToThrough;
 
 uses(TestCase::class);
 
@@ -96,6 +101,60 @@ describe('`BelongsToThrough` relationship', function (): void {
         expect($subquery)->toBeInstanceOf(Builder::class);
         expect($subquery->limit)->toBe(1);
     });
+});
+
+describe('relationship-defined joins', function (): void {
+    it('sorts columns and groups using joined relationship constraints and bindings', function (string $relationship, string $ordering, string $direction): void {
+        $users = collect();
+
+        foreach ([['Zulu', 'Approved'], ['Alpha', 'Approved'], ['Hidden', 'Pending']] as [$bio, $companyName]) {
+            $user = User::factory()->create();
+            $company = Company::factory()->create(['name' => $companyName]);
+            Profile::factory()->for($user)->for($company)->create(['bio' => $bio]);
+            $users->push($user);
+        }
+
+        expect(RelationshipOrdererUser::query()->findOrFail($users[0]->getKey())->{$relationship}->bio)->toBe('Zulu');
+        expect(RelationshipOrdererUser::query()->findOrFail($users[2]->getKey())->{$relationship})->toBeNull();
+
+        $query = RelationshipOrdererUser::query();
+        $path = "{$relationship}.bio";
+
+        if ($ordering === 'column') {
+            TextColumn::make($path)->sortable()->applySort($query, $direction);
+        } else {
+            Group::make($path)->orderQuery($query, $direction);
+        }
+
+        $orderedIds = $query->get()->modelKeys();
+
+        expect(array_values(array_diff($orderedIds, [$users[2]->getKey()])))->toBe($direction === 'asc'
+            ? [$users[1]->getKey(), $users[0]->getKey()]
+            : [$users[0]->getKey(), $users[1]->getKey()]);
+        expect(array_search($users[2]->getKey(), $orderedIds))->toBeIn([0, 2]);
+    })->with(['joinedProfile', 'joinedSubqueryProfile', 'latestJoinedProfile'])->with(['column', 'group'])->with(['asc', 'desc']);
+
+    it('preserves explicit joins alongside recreated through joins at intermediate hops', function (string $relationship): void {
+        $posts = collect();
+
+        foreach ([['Zulu', 'Approved'], ['Alpha', 'Approved'], ['Hidden', 'Pending']] as [$teamName, $companyName]) {
+            $company = Company::factory()->create(['name' => $companyName]);
+            $team = Team::factory()->for($company)->create(['name' => $teamName]);
+            $user = User::factory()->for($team)->create();
+            $posts->push(Post::factory()->for($user, 'author')->create());
+        }
+
+        $query = RelationshipOrdererPost::query();
+        TextColumn::make("{$relationship}.name")->sortable()->applySort($query, 'asc');
+        $orderedIds = $query->get()->modelKeys();
+
+        expect(array_values(array_diff($orderedIds, [$posts[2]->getKey()])))->toBe([$posts[1]->getKey(), $posts[0]->getKey()]);
+        expect(array_search($posts[2]->getKey(), $orderedIds))->toBeIn([0, 2]);
+
+        $query = RelationshipOrdererPost::query()->whereKey($posts[2]);
+        expect($query->selectSub($this->orderer->buildSubquery($query, "{$relationship}.company", 'name'), 'related_value')
+            ->sole()->related_value)->toBeNull();
+    })->with(['joinedTeam', 'joinedTeamThroughAuthor']);
 });
 
 describe('intermediate relationship scopes', function (): void {
@@ -201,6 +260,31 @@ class RelationshipOrdererUser extends User
 {
     protected $table = 'users';
 
+    public function joinedProfile(): HasOne
+    {
+        return $this->hasOne(Profile::class, 'user_id')
+            ->join('companies', static fn (JoinClause $join) => $join
+                ->on('companies.id', '=', 'profiles.company_id')
+                ->where('companies.name', '!=', 'Blocked'))
+            ->where('companies.name', 'Approved')
+            ->select('profiles.*');
+    }
+
+    public function joinedSubqueryProfile(): HasOne
+    {
+        return $this->hasOne(Profile::class, 'user_id')
+            ->joinSub(DB::table('companies')->where('name', '!=', 'Blocked'), 'approved_companies', static fn (JoinClause $join) => $join
+                ->on('approved_companies.id', '=', 'profiles.company_id')
+                ->where('approved_companies.name', '!=', 'Suspended'))
+            ->where('approved_companies.name', 'Approved')
+            ->select('profiles.*');
+    }
+
+    public function latestJoinedProfile(): HasOne
+    {
+        return $this->joinedProfile()->latestOfMany();
+    }
+
     public function postWithTrashed(): HasOne
     {
         return $this->hasOne(Post::class, 'author_id')->withTrashed();
@@ -221,5 +305,28 @@ class RelationshipOrdererUser extends User
     public function alternativePost(): HasOne
     {
         return $this->hasOne(Post::class, 'author_id')->where('rating', 2)->orWhere('rating', 9)->orderByDesc('posts.id');
+    }
+}
+
+class RelationshipOrdererPost extends Post
+{
+    protected $table = 'posts';
+
+    public function joinedTeam(): BelongsToThrough
+    {
+        return $this->team()
+            ->join('companies', static fn (JoinClause $join) => $join
+                ->on('companies.id', '=', 'teams.company_id')
+                ->where('companies.name', '!=', 'Blocked'))
+            ->where('companies.name', 'Approved');
+    }
+
+    public function joinedTeamThroughAuthor(): HasOneThrough
+    {
+        return $this->teamThroughAuthor()
+            ->join('companies', static fn (JoinClause $join) => $join
+                ->on('companies.id', '=', 'teams.company_id')
+                ->where('companies.name', '!=', 'Blocked'))
+            ->where('companies.name', 'Approved');
     }
 }
